@@ -76,6 +76,32 @@ As the owner:
 2. On the product, tap **Add stock** and enter how many you have. Do the same whenever goods arrive.
 3. **Staff → Add staff.** Enter a name, username and password. The app gives each person a staff ID (STF-001, STF-002 …) and shows the login details to hand over.
 
+## 9. Receipt printer (Xprinter XP-Q200)
+
+The app prints receipts straight to a USB receipt printer, and the paper cuts itself. This works in **Chrome or Edge** on the warehouse computer. Do this once on each computer that has the printer.
+
+**First, a one-time driver swap (Windows only).** Windows normally keeps the printer to itself, so the browser can't reach it. A free tool called Zadig hands it over:
+
+1. Plug the printer's USB cable into the computer and switch the printer on.
+2. Download Zadig from **zadig.akeo.ie** and open it. Click **Yes** if Windows asks for permission.
+3. In Zadig, open the **Options** menu and tick **List All Devices**.
+4. Pick the printer from the drop-down list. It may be called something like "XP-Q200", "Printer" or "USB Printing Support". If you're not sure, unplug the printer: the one that disappears from the list is the printer. Plug it back in and pick it.
+5. Make sure the box to the right of the green arrow says **WinUSB**, then click **Replace Driver** (or **Install Driver**). Wait until it says it worked.
+6. Unplug the printer and plug it back in.
+
+After this, the printer only prints from Chrome or Edge, not from other programs such as Word. To undo it, open **Device Manager**, right-click the printer, choose **Uninstall device** and tick **Attempt to remove the driver**. Then unplug the printer, plug it back in and install the Xprinter driver again.
+
+**Then connect it in the app:**
+
+1. Open the app and log in.
+2. Click **Receipt printer** at the bottom of the left menu (on a phone it's under **More**).
+3. Click **Connect printer**, pick the printer from the list and click **Connect**.
+4. Click **Print test**. A short test slip should print and cut.
+
+From now on, every invoice on this computer has a **Print receipt** button. If the app says the printer isn't connected, check it's switched on and plugged in.
+
+An Android phone or tablet with Chrome can use the printer too, through a USB OTG cable, and doesn't need the driver swap. iPhones can't use USB printers from a web app.
+
 ---
 
 ## Making changes with Claude Code

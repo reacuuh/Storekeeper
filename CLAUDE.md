@@ -26,6 +26,14 @@ Stock, bulk sales and staff app for a family water and provisions warehouse in L
   - `app/vendor/supabase.js`: supabase-js 2.117.2 UMD build, vendored.
   - `app/sw.js`: service worker so the site installs like an app. It is network-first. Bump `CACHE` when files are added or renamed.
 
+### The receipt printer
+
+- An Xprinter XP-Q200 (80mm, ESC/POS) on USB at the warehouse computer. The code is the "Receipt printer" section of `app/app.js`.
+- It uses WebUSB, so only Chrome and Edge (and Chrome on Android) can print to it. On Windows the printer's driver has to be swapped for WinUSB with Zadig first (SETUP.md, step 9). Without that, `open()` fails with "Access denied".
+- Receipts are drawn on a canvas and sent as a picture (`GS v 0`, 576 dots wide), then `GS V B` cuts the paper. Don't switch to text mode: the printer's fonts have no ₦.
+- Whether a computer uses the printer is kept in `localStorage` (`receiptPrinter`), because the printer belongs to a computer, not a login. Without it, Print opens the normal print window.
+- `test:e2e` swaps in a fake USB printer and saves what it printed as pictures in `tests/shots/` (`10-receipt.png`, `11-receipt-cancelled.png`). Look at them after changing the receipt.
+
 ### The database: `supabase-setup.sql`
 
 This one file is the whole database: tables, row level security, and every write as a SECURITY DEFINER function. The functions are `create_sale`, `receive_stock`, `save_product`, `set_price`, `record_payment`, `void_sale`, `create_staff`, `set_staff_active`, `reset_staff_password`, `archive_product`, `log_event`, `setup_owner` and `owner_exists`.

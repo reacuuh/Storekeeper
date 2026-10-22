@@ -49,6 +49,7 @@ const ICON = {
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',
   cash: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/>',
   chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/>',
+  print: '<path d="M6 9V3h12v6"/><rect x="2" y="9" width="20" height="9" rx="2"/><path d="M6 14h12v7H6z"/>',
   x: '<path d="M6 6l12 12M18 6L6 18"/>',
 };
 const icon = k => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k] || ''}</svg>`;
@@ -345,7 +346,7 @@ function renderShell() {
       <div class="who">
         <div class="nm">${esc(p.name)}</div>
         <div class="row" style="gap:6px"><span class="tag ${tagClass(p.staff_code)}">${esc(p.staff_code)}</span><span class="small" style="opacity:.75">@${esc(p.username)}</span></div>
-        <div class="acts"><button data-act="pw">Change password</button><button data-act="logout">Log out</button></div>
+        <div class="acts">${hasUsb() ? '<button data-act="printer">Receipt printer</button>' : ''}<button data-act="pw">Change password</button><button data-act="logout">Log out</button></div>
       </div>
     </aside>
     <header class="topbar">
@@ -358,6 +359,7 @@ function renderShell() {
   $$('[data-nav]').forEach(b => b.addEventListener('click', () => go(b.dataset.nav)));
   $$('[data-act="logout"]').forEach(b => b.addEventListener('click', logout));
   $$('[data-act="pw"]').forEach(b => b.addEventListener('click', changePasswordModal));
+  $$('[data-act="printer"]').forEach(b => b.addEventListener('click', () => printerModal()));
   go(S.view);
 }
 
@@ -407,6 +409,7 @@ const actions = {
   period: v => { S.ui.salesPeriod = v; render(); },
   go: v => go(v),
   pw: () => changePasswordModal(),
+  printer: () => printerModal(),
   logout: () => logout(),
 };
 
@@ -637,6 +640,7 @@ function viewMore() {
   ${pageHead(esc(p.name), `<span class="tag ${tagClass(p.staff_code)}">${esc(p.staff_code)}</span> @${esc(p.username)}`)}
   <div class="stack" style="max-width:520px">
     ${isOwner() ? item('go', 'staff', 'users', 'Staff', 'Add staff, new passwords, switch logins on or off') + item('go', 'activity', 'pulse', 'Activity', 'Everything staff are doing') : ''}
+    ${hasUsb() ? item('printer', '', 'print', 'Receipt printer', 'Print receipts on a USB receipt printer') : ''}
     ${item('pw', '', 'key', 'Change my password')}
     ${item('logout', '', 'out', 'Log out')}
   </div>`;
@@ -937,13 +941,221 @@ async function invoiceModal(id) {
     ${canChange ? `<button class="btn danger" id="iv-void" style="margin-right:auto">Cancel sale</button>` : ''}
     ${canChange && n0(s.balance) > 0 ? `<button class="btn" id="iv-pay">${icon('cash')}Record payment</button>` : ''}
     <a class="btn" href="${esc(wa)}" target="_blank" rel="noopener">${icon('chat')}WhatsApp</a>
-    <button class="btn" id="iv-print">Print</button>
+    <button class="btn" id="iv-print">${usesPrinter() ? 'Print receipt' : 'Print'}</button>
     <button class="btn primary" data-close>Done</button>
   </div>`, { wide: true });
-  $('#iv-print', m).addEventListener('click', () => window.print());
+  $('#iv-print', m).addEventListener('click', e => usesPrinter() ? printReceipt(saleReceipt(s, pays), e.currentTarget) : window.print());
   const pay = $('#iv-pay', m); if (pay) pay.addEventListener('click', () => paymentModal(s));
   const vd = $('#iv-void', m); if (vd) vd.addEventListener('click', () => voidModal(s));
 }
+
+/* ----- Receipt printer (XP-Q200 or another ESC/POS printer on USB) ----- */
+// Chrome and Edge talk to the printer directly over WebUSB. On Windows this only works once
+// the printer's driver has been swapped for WinUSB (SETUP.md, step 9).
+// Receipts go to the printer as a picture, because its built-in fonts have no ₦ sign.
+const PRINTER_KEY = 'receiptPrinter'; // set on each computer that has the printer
+const PAPER_DOTS = 576; // printable width of 80mm paper at 203 dpi
+const USB_PRINTER_CLASS = 7;
+const hasUsb = () => !!navigator.usb;
+function usesPrinter() { try { return hasUsb() && localStorage.getItem(PRINTER_KEY) === '1'; } catch (e) { return false; } }
+function setUsesPrinter(on) { try { if (on) localStorage.setItem(PRINTER_KEY, '1'); else localStorage.removeItem(PRINTER_KEY); } catch (e) {} }
+
+const isPrinter = d => d.configurations.some(c => c.interfaces.some(i => i.alternates.some(a => a.interfaceClass === USB_PRINTER_CLASS)));
+// getDevices() only lists printers this site was allowed to use that are plugged in right now
+async function findPrinter() { return (await navigator.usb.getDevices()).find(isPrinter) || null; }
+
+function printerError(e) {
+  const msg = String((e && e.message) || e || '');
+  if (msg === 'printer-missing' || (e && e.name === 'NotFoundError')) return 'The receipt printer is not connected. Check it is switched on and its USB cable is plugged in.';
+  if ((e && e.name === 'SecurityError') || /access denied/i.test(msg)) return "Windows is still using the printer's own driver, so the app can't reach the printer. Do the one-time printer setup in SETUP.md (step 9), then try again.";
+  if (/claim/i.test(msg)) return 'The printer is busy. Close any other window that has this app open, then try again.';
+  if (msg === 'printer-stuck') return 'The printer is not taking the receipt. Check it has paper and the lid is shut, then try again.';
+  return 'Could not print. Switch the printer off and on again, then try again.';
+}
+
+// One job at a time, so two quick taps can't mix two receipts together.
+let printQueue = Promise.resolve();
+function sendToPrinter(bytes) {
+  const job = printQueue.then(() => writeToPrinter(bytes));
+  printQueue = job.catch(() => {});
+  return job;
+}
+async function writeToPrinter(bytes) {
+  const dev = await findPrinter();
+  if (!dev) throw new Error('printer-missing');
+  await dev.open();
+  try {
+    if (!dev.configuration) await dev.selectConfiguration(1);
+    const { iface, ep } = bulkOut(dev);
+    await dev.claimInterface(iface);
+    for (let i = 0; i < bytes.length; i += 16384) {
+      // A printer out of paper stops accepting data and the transfer never finishes on its own.
+      const res = await withinTime(dev.transferOut(ep, bytes.subarray(i, i + 16384)), 15000);
+      if (res.status !== 'ok') throw new Error('printer-stuck');
+    }
+  } finally {
+    // close() also cancels a stuck transfer and frees the printer for other windows
+    await dev.close().catch(() => {});
+  }
+}
+function bulkOut(dev) {
+  for (const i of dev.configuration.interfaces) for (const a of i.alternates) {
+    const ep = a.interfaceClass === USB_PRINTER_CLASS && a.endpoints.find(e => e.direction === 'out' && e.type === 'bulk');
+    if (ep) return { iface: i.interfaceNumber, ep: ep.endpointNumber };
+  }
+  throw new Error('printer-unknown');
+}
+function withinTime(p, ms) {
+  let timer;
+  return Promise.race([p, new Promise((_, no) => { timer = setTimeout(() => no(new Error('printer-stuck')), ms); })]).finally(() => clearTimeout(timer));
+}
+
+// A receipt is a list of lines: 'rule' or { text, right, size, bold, align, invert }.
+function saleReceipt(s, pays) {
+  const when = toDate(s.created_at);
+  const r = [
+    { text: CFG.businessName || 'Warehouse', size: 40, bold: true, align: 'center' },
+    CFG.businessAddress && { text: CFG.businessAddress, align: 'center' },
+    CFG.businessPhone && { text: CFG.businessPhone, align: 'center' },
+    'rule',
+    { text: s.invoice_no, size: 30, bold: true },
+    when && { text: when.toLocaleString('en-NG', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) },
+    { text: `Served by ${s.sold_by_name} (${s.sold_by_code})` },
+    { text: `Customer: ${s.customer_name || 'Walk-in customer'}` },
+    s.customer_phone && { text: s.customer_phone },
+    'rule',
+    ...(s.items || []).flatMap(i => [{ text: i.name, bold: true }, { text: `${plural(i.qty, i.unit)} × ${money(i.price)}`, right: money(i.total) }]),
+    'rule',
+    { text: 'Total', right: money(s.total), size: 32, bold: true },
+    { text: 'Paid', right: money(s.amount_paid) },
+    { text: 'Balance', right: money(s.balance), bold: true },
+  ];
+  if (isVoid(s)) r.push('rule', { text: 'CANCELLED', size: 32, bold: true, align: 'center', invert: true }, s.void_reason && { text: s.void_reason, align: 'center' });
+  if (pays.length) r.push('rule', { text: 'Payments', bold: true }, ...pays.map(p => ({ text: `${fmtD(p.created_at)} · ${METHODS[p.method] || p.method}`, right: money(p.amount) })));
+  if (s.note) r.push('rule', { text: `Note: ${s.note}` });
+  r.push('rule', { text: 'Thank you for your business.', align: 'center' });
+  return r.filter(Boolean);
+}
+const testReceipt = () => [
+  { text: CFG.businessName || 'Warehouse', size: 40, bold: true, align: 'center' },
+  'rule',
+  { text: 'Test print', size: 30, bold: true, align: 'center' },
+  { text: 'The receipt printer is working.', align: 'center' },
+  { text: new Date().toLocaleString('en-NG', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }), align: 'center' },
+];
+
+const receiptFont = (size, bold) => `${bold ? 700 : 600} ${size}px Barlow, Arial, sans-serif`;
+function wrapText(ctx, text, max) {
+  const rows = []; let row = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const next = row ? row + ' ' + word : word;
+    if (!row || ctx.measureText(next).width <= max) row = next; else { rows.push(row); row = word; }
+  }
+  return rows.concat(row);
+}
+// Draws the receipt and returns its height. Run once on a 1px canvas to measure, then again to draw.
+function drawReceipt(ctx, lines) {
+  const W = PAPER_DOTS, PAD = 8;
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, ctx.canvas.height);
+  ctx.fillStyle = '#000'; ctx.textBaseline = 'top';
+  let y = 4;
+  for (const l of lines) {
+    if (l === 'rule') { y += 6; ctx.fillRect(PAD, y, W - PAD * 2, 2); y += 14; continue; }
+    const size = l.size || 24, lh = Math.round(size * 1.3), top = Math.round((lh - size) / 2);
+    ctx.font = receiptFont(size, l.bold);
+    const rightW = l.right ? ctx.measureText(l.right).width + 16 : 0;
+    const max = W - PAD * 2 - rightW;
+    const rows = wrapText(ctx, String(l.text), max);
+    if (l.invert) { ctx.fillRect(PAD, y, W - PAD * 2, rows.length * lh + 8); ctx.fillStyle = '#fff'; y += 4; }
+    rows.forEach((row, n) => {
+      ctx.textAlign = l.align || 'left';
+      ctx.fillText(row, l.align === 'center' ? W / 2 : PAD, y + top, max);
+      if (l.right && n === 0) { ctx.textAlign = 'right'; ctx.fillText(l.right, W - PAD, y + top); }
+      y += lh;
+    });
+    if (l.invert) { ctx.fillStyle = '#000'; y += 4; }
+  }
+  return y + 24;
+}
+async function receiptBytes(lines) {
+  await Promise.all([document.fonts.load(receiptFont(24, false)), document.fonts.load(receiptFont(24, true))]);
+  const canvas = document.createElement('canvas');
+  canvas.width = PAPER_DOTS; canvas.height = 1;
+  canvas.height = drawReceipt(canvas.getContext('2d'), lines);
+  const ctx = canvas.getContext('2d');
+  drawReceipt(ctx, lines);
+  const w = canvas.width, h = canvas.height, rowBytes = w / 8, BAND = 255;
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const out = new Uint8Array(2 + Math.ceil(h / BAND) * 8 + rowBytes * h + 4);
+  let o = 0;
+  out.set([0x1b, 0x40], o); o += 2; // ESC @: reset the printer
+  // GS v 0 sends the picture one band at a time; small printers choke on one huge image.
+  for (let top = 0; top < h; top += BAND) {
+    const rows = Math.min(BAND, h - top);
+    out.set([0x1d, 0x76, 0x30, 0, rowBytes & 255, rowBytes >> 8, rows & 255, rows >> 8], o); o += 8;
+    for (let y = top; y < top + rows; y++, o += rowBytes) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        // Slightly darker than half-grey counts as black, so the edges of letters print solid.
+        if (px[i] + px[i + 1] + px[i + 2] < 480) out[o + (x >> 3)] |= 0x80 >> (x & 7);
+      }
+    }
+  }
+  out.set([0x1d, 0x56, 0x42, 0], o); // GS V B: feed up to the cutter, then cut
+  return out;
+}
+
+async function printReceipt(lines, btn) {
+  const label = btn.innerHTML;
+  busy(btn, true, 'Printing…');
+  try {
+    await sendToPrinter(await receiptBytes(lines));
+    toast('Receipt sent to the printer', 'good');
+  } catch (e) { toast(printerError(e), 'bad'); }
+  btn.innerHTML = label; busy(btn, false);
+}
+
+async function printerModal() {
+  const on = usesPrinter();
+  const dev = on ? await findPrinter() : null;
+  const m = openModal(`${mHead('Receipt printer')}
+  <div class="modal-b" id="pr-b">
+    ${dev ? `<div class="row" style="gap:10px"><span class="pill good">Ready</span><b>${esc(dev.productName || 'USB printer')}</b></div>
+      <p class="muted" style="margin:0">Tap <b>Print receipt</b> on any sale to print it here.</p>`
+    : `${on ? '<span class="pill warn" style="justify-self:start">Not connected</span>' : ''}
+      <p style="margin:0">Plug the receipt printer's USB cable into this computer and switch the printer on. Then tap <b>Connect printer</b> and pick it from the list.</p>`}
+    <div class="err" id="pr-err"></div>
+  </div>
+  <div class="modal-f">
+    ${on ? '<button class="btn danger" id="pr-off" style="margin-right:auto">Stop using it</button>' : ''}
+    ${dev ? `<button class="btn" id="pr-test">${icon('print')}Print test</button>` : '<button class="btn primary" id="pr-add">Connect printer</button>'}
+    <button class="btn ${dev ? 'primary' : ''}" data-close>Done</button>
+  </div>`);
+  const add = $('#pr-add', m); if (add) add.addEventListener('click', () => connectPrinter(m));
+  const test = $('#pr-test', m); if (test) test.addEventListener('click', () => printReceipt(testReceipt(), test));
+  const off = $('#pr-off', m); if (off) off.addEventListener('click', async () => {
+    const d = await findPrinter();
+    if (d && d.forget) await d.forget().catch(() => {});
+    setUsesPrinter(false);
+    toast('This computer no longer uses the receipt printer.');
+    printerModal();
+  });
+}
+async function connectPrinter(m) {
+  const err = $('#pr-err', m); err.textContent = '';
+  let dev;
+  try { dev = await navigator.usb.requestDevice({ filters: [{ classCode: USB_PRINTER_CLASS }] }); }
+  catch (e) { err.textContent = 'No printer was picked. If it is not in the list, check it is switched on and plugged in.'; return; }
+  try {
+    // Open it once now, so a Windows driver problem shows up here and not in the middle of a sale.
+    await dev.open();
+    await dev.close();
+    setUsesPrinter(true);
+    toast('Receipt printer connected', 'good');
+    printerModal();
+  } catch (e) { err.textContent = printerError(e); }
+}
+if (hasUsb()) ['connect', 'disconnect'].forEach(ev => navigator.usb.addEventListener(ev, () => { if ($('#pr-b')) printerModal(); }));
 
 function paymentModal(s) {
   const m = openModal(`${mHead('Record payment')}

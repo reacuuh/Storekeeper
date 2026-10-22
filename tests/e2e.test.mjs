@@ -46,6 +46,51 @@ async function addProduct(page, name, unit, price) {
   await page.click('#pf button[type=submit]');
   await page.waitForSelector(`.pcard:has-text("${name}")`);
 }
+// A pretend XP-Q200 on USB, put in place of the browser's WebUSB before the app loads.
+// window.__usb.mode: 'ok', 'denied' (Windows still has the printer's own driver) or 'unplugged'.
+function fakeUsbPrinter() {
+  const usb = window.__usb = { mode: 'ok', sent: [] };
+  const allowed = () => sessionStorage.getItem('usbAllowed') === '1';
+  const out = { endpointNumber: 1, direction: 'out', type: 'bulk', packetSize: 64 };
+  const alt = { alternateSetting: 0, interfaceClass: 7, interfaceSubclass: 1, interfaceProtocol: 2, endpoints: [out] };
+  const cfg = { configurationValue: 1, interfaces: [{ interfaceNumber: 0, alternate: alt, alternates: [alt], claimed: false }] };
+  const device = {
+    productName: 'XP-Q200', vendorId: 0x0483, productId: 0x5743, configurations: [cfg], configuration: null, opened: false,
+    async open() { if (usb.mode === 'denied') throw new DOMException('Access denied.', 'SecurityError'); this.opened = true; },
+    async selectConfiguration() { this.configuration = cfg; },
+    async claimInterface() {},
+    async transferOut(ep, data) { for (const b of data) usb.sent.push(b); return { status: 'ok', bytesWritten: data.byteLength }; },
+    async close() { this.opened = false; },
+    async forget() { sessionStorage.removeItem('usbAllowed'); },
+  };
+  Object.defineProperty(navigator, 'usb', { configurable: true, value: {
+    async getDevices() { return allowed() && usb.mode !== 'unplugged' ? [device] : []; },
+    async requestDevice() { sessionStorage.setItem('usbAllowed', '1'); return device; },
+    addEventListener() {},
+  } });
+}
+const takePrinted = page => page.evaluate(() => window.__usb.sent.splice(0));
+const clearToasts = page => page.evaluate(() => { document.querySelector('#toast').innerHTML = ''; });
+// Reads back a print job: ESC @, picture bands (GS v 0, 72 bytes = 576 dots wide), then the paper cut.
+function readReceipt(b) {
+  if (b[0] !== 0x1b || b[1] !== 0x40) return null;
+  const rows = []; let i = 2;
+  while (b[i] === 0x1d && b[i + 1] === 0x76 && b[i + 2] === 0x30) {
+    const w = b[i + 4] + b[i + 5] * 256, h = b[i + 6] + b[i + 7] * 256; i += 8;
+    for (let y = 0; y < h; y++, i += w) rows.push(b.slice(i, i + w));
+  }
+  return rows.length && rows.every(r => r.length === 72) && b.slice(i).join() === '29,86,66,0' ? rows : null;
+}
+async function receiptShot(page, rows, name) {
+  const png = await page.evaluate(rows => {
+    const c = document.createElement('canvas'); c.width = rows[0].length * 8; c.height = rows.length;
+    const ctx = c.getContext('2d'), img = ctx.createImageData(c.width, c.height);
+    rows.forEach((r, y) => { for (let x = 0; x < c.width; x++) { const k = (y * c.width + x) * 4, v = r[x >> 3] & (0x80 >> (x & 7)) ? 0 : 255; img.data.set([v, v, v, 255], k); } });
+    ctx.putImageData(img, 0, 0);
+    return c.toDataURL('image/png').split(',')[1];
+  }, rows);
+  fs.writeFileSync(SHOTS + name + '.png', Buffer.from(png, 'base64'));
+}
 async function addStockFromCard(page, name, n) {
   await page.locator(`.pcard:has-text("${name}") >> text=Add stock`).click();
   await page.fill('#sf-q', String(n));
@@ -248,6 +293,66 @@ try {
   ok(true, 'new password works');
   await ctx.close();
 
+  // ---------------- receipt printer ----------------
+  console.log('\nReceipt printer (pretend XP-Q200 on USB)');
+  ({ ctx, page } = await newPage());
+  await ctx.addInitScript(fakeUsbPrinter);
+  await login(page, 'mummy', 'water2026');
+  await page.waitForSelector('h1:text("Today")');
+  await page.click('[data-nav="sales"] >> visible=true');
+  await page.click('tr:has-text("INV-00001")');
+  ok((await page.locator('#iv-print').innerText()) === 'Print', 'Print uses the normal print window until a receipt printer is connected');
+  await page.click('.modal-f >> text=Done');
+
+  await page.click('.rail [data-act="printer"]');
+  await page.evaluate(() => { window.__usb.mode = 'denied'; });
+  await page.click('#pr-add');
+  await page.waitForSelector('#pr-err:has-text("SETUP.md (step 9)")');
+  ok(await page.locator('#pr-add').isVisible(), "Windows driver problem explained when connecting; printer not saved");
+  await page.evaluate(() => { window.__usb.mode = 'ok'; });
+  await page.click('#pr-add');
+  await page.waitForSelector('#pr-b :text("Ready")');
+  ok(await page.locator('#pr-b :text("XP-Q200")').isVisible(), 'printer connected and shown as ready');
+  await shot(page, '09-printer-ready');
+  await clearToasts(page);
+  await page.click('#pr-test');
+  await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
+  ok(readReceipt(await takePrinted(page)) !== null, 'test print sent as a 576-dot picture followed by a paper cut');
+  await page.click('.modal-f >> text=Done');
+
+  await page.click('tr:has-text("INV-00001")');
+  ok((await page.locator('#iv-print').innerText()) === 'Print receipt', 'invoice button now says "Print receipt"');
+  await clearToasts(page);
+  await page.click('#iv-print');
+  await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
+  const receipt = readReceipt(await takePrinted(page));
+  ok(receipt !== null && receipt.length > 400, 'receipt printed straight to the printer', receipt ? receipt.length + ' rows' : 'bad print job');
+  if (receipt) await receiptShot(page, receipt, '10-receipt');
+  await page.evaluate(() => { window.__usb.mode = 'unplugged'; });
+  await clearToasts(page);
+  await page.click('#iv-print');
+  await page.waitForSelector('.toast:has-text("The receipt printer is not connected")');
+  ok((await takePrinted(page)).length === 0, 'unplugged printer gives a clear message');
+  await page.click('.modal-f >> text=Done');
+
+  await page.evaluate(() => { window.__usb.mode = 'ok'; });
+  await page.click('tr:has-text("INV-00002")');
+  await clearToasts(page);
+  await page.click('#iv-print');
+  await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
+  const voided = readReceipt(await takePrinted(page));
+  ok(voided !== null, 'cancelled sale prints too');
+  if (voided) await receiptShot(page, voided, '11-receipt-cancelled');
+  await page.click('.modal-f >> text=Done');
+
+  await page.click('.rail [data-act="printer"]');
+  await page.click('#pr-off');
+  await page.waitForSelector('#pr-add');
+  await page.click('.modal-f >> text=Done');
+  await page.click('tr:has-text("INV-00001")');
+  ok((await page.locator('#iv-print').innerText()) === 'Print', '"Stop using it" puts Print back to the normal print window');
+  await ctx.close();
+
   // ---------------- phone ----------------
   console.log('\nPhone views');
   ({ ctx, page } = await newPage({ width: 390, height: 844 }));
@@ -268,6 +373,7 @@ try {
     await page.click(`.tabbar [data-nav="${v}"]`);
     await page.waitForTimeout(300);
     ok(await noSideScroll(page), `no sideways scrolling on phone: ${v}`);
+    if (v === 'more') await shot(page, '12-phone-more');
   }
   await ctx.close();
 
