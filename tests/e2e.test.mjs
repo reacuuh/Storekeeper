@@ -69,7 +69,21 @@ function fakeUsbPrinter() {
     addEventListener() {},
   } });
 }
+// A pretend Windows app (desktop/preload.js) with two installed printers. Keeps the jobs it was given.
+function fakeWindowsApp() {
+  const desk = window.__desk = { printers: [{ name: 'Microsoft Print to PDF', isDefault: true }, { name: 'XP-80C', isDefault: false }], jobs: [] };
+  window.desktop = {
+    printers: async () => desk.printers,
+    async print(name, bytes) {
+      if (!desk.printers.some(p => p.name === name)) throw new Error("Error invoking remote method 'print': Error: printer-missing");
+      desk.jobs.push({ name, bytes: Array.from(bytes) });
+    },
+    retry: async () => {},
+  };
+}
 const takePrinted = page => page.evaluate(() => window.__usb.sent.splice(0));
+// Stands in for the print window: counts calls instead of opening it, and leaves the print copy in place.
+const catchPrintWindow = page => page.evaluate(() => { window.__printCalls = 0; window.print = () => { window.__printCalls++; }; });
 const clearToasts = page => page.evaluate(() => { document.querySelector('#toast').innerHTML = ''; });
 // Reads back a print job: ESC @, picture bands (GS v 0, 72 bytes = 576 dots wide), then the paper cut.
 function readReceipt(b) {
@@ -301,7 +315,17 @@ try {
   await page.waitForSelector('h1:text("Today")');
   await page.click('[data-nav="sales"] >> visible=true');
   await page.click('tr:has-text("INV-00001")');
-  ok((await page.locator('#iv-print').innerText()) === 'Print', 'Print uses the normal print window until a receipt printer is connected');
+  await catchPrintWindow(page);
+  await page.click('#iv-print');
+  await page.waitForFunction(() => window.__printCalls === 1);
+  ok(true, 'with no receipt printer connected, Print receipt opens the print window');
+  const pdf = await page.pdf({ preferCSSPageSize: true });
+  fs.writeFileSync(SHOTS + '14-print-window.pdf', pdf);
+  const pages = [...pdf.toString('latin1').matchAll(/\/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/g)].map(m => [+m[1], +m[2]]);
+  ok(pages.length === 1 && Math.abs(pages[0][0] - 226.8) < 1 && pages[0][1] > 150 && pages[0][1] < 400,
+    'print window gets one 80mm page as long as the receipt, not the whole screen', JSON.stringify(pages));
+  await page.evaluate(() => dispatchEvent(new Event('afterprint')));
+  ok((await page.locator('#print-receipt').count()) === 0, 'print copy removed after printing');
   await page.click('.modal-f >> text=Done');
 
   await page.click('.rail [data-act="printer"]');
@@ -321,7 +345,6 @@ try {
   await page.click('.modal-f >> text=Done');
 
   await page.click('tr:has-text("INV-00001")');
-  ok((await page.locator('#iv-print').innerText()) === 'Print receipt', 'invoice button now says "Print receipt"');
   await clearToasts(page);
   await page.click('#iv-print');
   await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
@@ -350,7 +373,47 @@ try {
   await page.waitForSelector('#pr-add');
   await page.click('.modal-f >> text=Done');
   await page.click('tr:has-text("INV-00001")');
-  ok((await page.locator('#iv-print').innerText()) === 'Print', '"Stop using it" puts Print back to the normal print window');
+  await catchPrintWindow(page);
+  await page.click('#iv-print');
+  await page.waitForFunction(() => window.__printCalls === 1);
+  ok((await takePrinted(page)).length === 0, '"Stop using it" sends receipts back to the print window');
+  await ctx.close();
+
+  console.log('\nReceipt printer in the Windows app (pretend desktop/preload.js)');
+  ({ ctx, page } = await newPage());
+  await ctx.addInitScript(fakeWindowsApp);
+  await login(page, 'mummy', 'water2026');
+  await page.waitForSelector('h1:text("Today")');
+  await page.click('.rail [data-act="printer"]');
+  ok((await page.locator('#pr-pick').inputValue()) === 'XP-80C', 'installed printers listed, with the receipt printer already picked');
+  await page.click('#pr-use');
+  await page.waitForSelector('#pr-b :text("Ready")');
+  ok(await page.locator('#pr-b b:text("XP-80C")').isVisible(), 'XP-80C shown as ready');
+  await clearToasts(page);
+  await page.click('#pr-test');
+  await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
+  let jobs = await page.evaluate(() => window.__desk.jobs.splice(0));
+  ok(jobs.length === 1 && jobs[0].name === 'XP-80C' && readReceipt(jobs[0].bytes) !== null, 'test print goes to XP-80C through Windows');
+  await page.click('.modal-f >> text=Done');
+  await page.click('[data-nav="sales"] >> visible=true');
+  await page.click('tr:has-text("INV-00001")');
+  await clearToasts(page);
+  await page.click('#iv-print');
+  await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
+  jobs = await page.evaluate(() => window.__desk.jobs.splice(0));
+  ok(jobs.length === 1 && readReceipt(jobs[0].bytes)?.length > 400, 'invoice receipt printed through Windows');
+  await page.evaluate(() => { window.__desk.printers.pop(); });
+  await clearToasts(page);
+  await page.click('#iv-print');
+  await page.waitForSelector('.toast:has-text("not installed on this computer any more")');
+  ok(true, 'removed printer gives a clear message');
+  await page.click('.modal-f >> text=Done');
+  await page.click('.rail [data-act="printer"]');
+  ok(await page.locator('#pr-b :text("is not on this computer any more")').isVisible(), 'printer window asks to pick again');
+  await shot(page, '13-windows-app-printer-gone');
+  await page.click('#pr-off');
+  await page.waitForSelector('#pr-use');
+  ok((await page.evaluate(() => localStorage.getItem('receiptPrinterName'))) === null, '"Stop using it" forgets the printer');
   await ctx.close();
 
   // ---------------- phone ----------------

@@ -290,11 +290,13 @@ tbody tr.click:hover { background: var(--surface-2); }
 .toast.good { background: var(--good); color: #fff; }
 @media (min-width: 861px) { #toast { bottom: 24px; } }
 
-/* ---------- Print: only the invoice ---------- */
+/* ---------- Print: only the receipt (printInBrowser in app.js) ---------- */
+/* The rest of the app is display:none, not just hidden, so it takes up no paper. */
+#print-receipt { display: none; }
 @media print {
-  body * { visibility: hidden !important; }
-  .invoice, .invoice * { visibility: visible !important; }
-  .invoice { position: absolute; left: 0; top: 0; width: 100%; border: 0; padding: 0; }
+  body.printing-receipt > :not(#print-receipt) { display: none !important; }
+  body.printing-receipt #print-receipt { display: block; }
+  #print-receipt img { display: block; width: 72mm; margin: 0 auto; }
   body { background: #fff; }
 }
 

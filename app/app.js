@@ -346,7 +346,7 @@ function renderShell() {
       <div class="who">
         <div class="nm">${esc(p.name)}</div>
         <div class="row" style="gap:6px"><span class="tag ${tagClass(p.staff_code)}">${esc(p.staff_code)}</span><span class="small" style="opacity:.75">@${esc(p.username)}</span></div>
-        <div class="acts">${hasUsb() ? '<button data-act="printer">Receipt printer</button>' : ''}<button data-act="pw">Change password</button><button data-act="logout">Log out</button></div>
+        <div class="acts">${canPrint() ? '<button data-act="printer">Receipt printer</button>' : ''}<button data-act="pw">Change password</button><button data-act="logout">Log out</button></div>
       </div>
     </aside>
     <header class="topbar">
@@ -640,7 +640,7 @@ function viewMore() {
   ${pageHead(esc(p.name), `<span class="tag ${tagClass(p.staff_code)}">${esc(p.staff_code)}</span> @${esc(p.username)}`)}
   <div class="stack" style="max-width:520px">
     ${isOwner() ? item('go', 'staff', 'users', 'Staff', 'Add staff, new passwords, switch logins on or off') + item('go', 'activity', 'pulse', 'Activity', 'Everything staff are doing') : ''}
-    ${hasUsb() ? item('printer', '', 'print', 'Receipt printer', 'Print receipts on a USB receipt printer') : ''}
+    ${canPrint() ? item('printer', '', 'print', 'Receipt printer', 'Print receipts on a receipt printer') : ''}
     ${item('pw', '', 'key', 'Change my password')}
     ${item('logout', '', 'out', 'Log out')}
   </div>`;
@@ -941,35 +941,44 @@ async function invoiceModal(id) {
     ${canChange ? `<button class="btn danger" id="iv-void" style="margin-right:auto">Cancel sale</button>` : ''}
     ${canChange && n0(s.balance) > 0 ? `<button class="btn" id="iv-pay">${icon('cash')}Record payment</button>` : ''}
     <a class="btn" href="${esc(wa)}" target="_blank" rel="noopener">${icon('chat')}WhatsApp</a>
-    <button class="btn" id="iv-print">${usesPrinter() ? 'Print receipt' : 'Print'}</button>
+    <button class="btn" id="iv-print">${icon('print')}Print receipt</button>
     <button class="btn primary" data-close>Done</button>
   </div>`, { wide: true });
-  $('#iv-print', m).addEventListener('click', e => usesPrinter() ? printReceipt(saleReceipt(s, pays), e.currentTarget) : window.print());
+  $('#iv-print', m).addEventListener('click', e => usesPrinter() ? printReceipt(saleReceipt(s, pays), e.currentTarget) : printInBrowser(saleReceipt(s, pays)));
   const pay = $('#iv-pay', m); if (pay) pay.addEventListener('click', () => paymentModal(s));
   const vd = $('#iv-void', m); if (vd) vd.addEventListener('click', () => voidModal(s));
 }
 
-/* ----- Receipt printer (XP-Q200 or another ESC/POS printer on USB) ----- */
-// Chrome and Edge talk to the printer directly over WebUSB. On Windows this only works once
-// the printer's driver has been swapped for WinUSB (SETUP.md, step 9).
-// Receipts go to the printer as a picture, because its built-in fonts have no ₦ sign.
-const PRINTER_KEY = 'receiptPrinter'; // set on each computer that has the printer
+/* ----- Receipt printer (XP-Q200 or another ESC/POS printer) ----- */
+// In the Windows app (desktop/) receipts go through the Windows print queue, so the printer
+// keeps its normal driver. In Chrome or Edge they go straight to the printer over WebUSB,
+// which on Windows only works once the driver has been swapped for WinUSB (SETUP.md, step 9).
+// Either way the receipt is sent as a picture, because the printer's built-in fonts have no ₦ sign.
+const desktop = window.desktop || null; // added by desktop/preload.js
+const PRINTER_NAME_KEY = 'receiptPrinterName'; // Windows app: the Windows printer to use
+const PRINTER_KEY = 'receiptPrinter'; // browser: '1' once a USB printer is connected on this computer
 const PAPER_DOTS = 576; // printable width of 80mm paper at 203 dpi
 const USB_PRINTER_CLASS = 7;
 const hasUsb = () => !!navigator.usb;
-function usesPrinter() { try { return hasUsb() && localStorage.getItem(PRINTER_KEY) === '1'; } catch (e) { return false; } }
-function setUsesPrinter(on) { try { if (on) localStorage.setItem(PRINTER_KEY, '1'); else localStorage.removeItem(PRINTER_KEY); } catch (e) {} }
+const canPrint = () => !!desktop || hasUsb();
+function readKey(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+function writeKey(k, v) { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) {} }
+const printerName = () => readKey(PRINTER_NAME_KEY);
+function usesPrinter() { return desktop ? !!printerName() : hasUsb() && readKey(PRINTER_KEY) === '1'; }
 
 const isPrinter = d => d.configurations.some(c => c.interfaces.some(i => i.alternates.some(a => a.interfaceClass === USB_PRINTER_CLASS)));
 // getDevices() only lists printers this site was allowed to use that are plugged in right now
 async function findPrinter() { return (await navigator.usb.getDevices()).find(isPrinter) || null; }
 
+// The Windows app's errors arrive wrapped, e.g. "Error invoking remote method 'print': Error: printer-missing".
 function printerError(e) {
   const msg = String((e && e.message) || e || '');
-  if (msg === 'printer-missing' || (e && e.name === 'NotFoundError')) return 'The receipt printer is not connected. Check it is switched on and its USB cable is plugged in.';
+  if (desktop && /printer-missing/.test(msg)) return 'The receipt printer is not installed on this computer any more. Open Receipt printer and pick it again.';
+  if (/printer-missing/.test(msg) || (e && e.name === 'NotFoundError')) return 'The receipt printer is not connected. Check it is switched on and its USB cable is plugged in.';
+  if (/printer-refused/.test(msg)) return 'Windows would not take the receipt. Open Receipt printer and check the right printer is picked.';
   if ((e && e.name === 'SecurityError') || /access denied/i.test(msg)) return "Windows is still using the printer's own driver, so the app can't reach the printer. Do the one-time printer setup in SETUP.md (step 9), then try again.";
   if (/claim/i.test(msg)) return 'The printer is busy. Close any other window that has this app open, then try again.';
-  if (msg === 'printer-stuck') return 'The printer is not taking the receipt. Check it has paper and the lid is shut, then try again.';
+  if (/printer-stuck/.test(msg)) return 'The printer is not taking the receipt. Check it has paper and the lid is shut, then try again.';
   return 'Could not print. Switch the printer off and on again, then try again.';
 }
 
@@ -981,6 +990,7 @@ function sendToPrinter(bytes) {
   return job;
 }
 async function writeToPrinter(bytes) {
+  if (desktop) return desktop.print(printerName(), bytes);
   const dev = await findPrinter();
   if (!dev) throw new Error('printer-missing');
   await dev.open();
@@ -1077,15 +1087,24 @@ function drawReceipt(ctx, lines) {
   }
   return y + 24;
 }
-async function receiptBytes(lines) {
+// The receipt as a black-and-white picture, PAPER_DOTS wide (8 dots per mm).
+async function receiptCanvas(lines) {
   await Promise.all([document.fonts.load(receiptFont(24, false)), document.fonts.load(receiptFont(24, true))]);
   const canvas = document.createElement('canvas');
   canvas.width = PAPER_DOTS; canvas.height = 1;
   canvas.height = drawReceipt(canvas.getContext('2d'), lines);
   const ctx = canvas.getContext('2d');
   drawReceipt(ctx, lines);
+  // Thermal paper has no grey. Slightly darker than half-grey becomes black, so the edges of letters print solid.
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height), px = img.data;
+  for (let i = 0; i < px.length; i += 4) { px[i] = px[i + 1] = px[i + 2] = px[i] + px[i + 1] + px[i + 2] < 480 ? 0 : 255; px[i + 3] = 255; }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+async function receiptBytes(lines) {
+  const canvas = await receiptCanvas(lines);
   const w = canvas.width, h = canvas.height, rowBytes = w / 8, BAND = 255;
-  const px = ctx.getImageData(0, 0, w, h).data;
+  const px = canvas.getContext('2d').getImageData(0, 0, w, h).data;
   const out = new Uint8Array(2 + Math.ceil(h / BAND) * 8 + rowBytes * h + 4);
   let o = 0;
   out.set([0x1b, 0x40], o); o += 2; // ESC @: reset the printer
@@ -1094,15 +1113,31 @@ async function receiptBytes(lines) {
     const rows = Math.min(BAND, h - top);
     out.set([0x1d, 0x76, 0x30, 0, rowBytes & 255, rowBytes >> 8, rows & 255, rows >> 8], o); o += 8;
     for (let y = top; y < top + rows; y++, o += rowBytes) {
-      for (let x = 0; x < w; x++) {
-        const i = (y * w + x) * 4;
-        // Slightly darker than half-grey counts as black, so the edges of letters print solid.
-        if (px[i] + px[i + 1] + px[i + 2] < 480) out[o + (x >> 3)] |= 0x80 >> (x & 7);
-      }
+      for (let x = 0; x < w; x++) if (px[(y * w + x) * 4] === 0) out[o + (x >> 3)] |= 0x80 >> (x & 7);
     }
   }
   out.set([0x1d, 0x56, 0x42, 0], o); // GS V B: feed up to the cutter, then cut
   return out;
+}
+
+// No receipt printer connected: print the same picture through the print window, on one
+// 80mm page exactly as long as the receipt, with nothing else from the screen on it.
+async function printInBrowser(lines) {
+  const canvas = await receiptCanvas(lines);
+  const img = new Image();
+  img.alt = '';
+  img.src = canvas.toDataURL('image/png');
+  await img.decode();
+  const box = document.createElement('div');
+  box.id = 'print-receipt';
+  box.append(img);
+  const page = document.createElement('style');
+  page.textContent = `@page { size: 80mm ${Math.ceil(canvas.height / 8)}mm; margin: 0; }`;
+  document.head.append(page);
+  document.body.append(box);
+  document.body.classList.add('printing-receipt');
+  window.addEventListener('afterprint', () => { box.remove(); page.remove(); document.body.classList.remove('printing-receipt'); }, { once: true });
+  window.print();
 }
 
 async function printReceipt(lines, btn) {
@@ -1115,7 +1150,46 @@ async function printReceipt(lines, btn) {
   btn.innerHTML = label; busy(btn, false);
 }
 
-async function printerModal() {
+function printerModal() { return desktop ? windowsPrinterModal() : usbPrinterModal(); }
+
+// Windows app: pick one of the printers installed on this computer.
+async function windowsPrinterModal() {
+  const list = await desktop.printers();
+  const chosen = printerName();
+  const ready = list.some(p => p.name === chosen);
+  // The likely receipt printer goes first, so it is already picked. ("XP-" but not "XPS Document Writer".)
+  const likely = p => /xprinter|xp-|receipt|thermal|pos-?\d|80mm/i.test(p.name);
+  const options = [...list].sort((a, b) => likely(b) - likely(a));
+  const m = openModal(`${mHead('Receipt printer')}
+  <div class="modal-b" id="pr-b">
+    ${ready ? `<div class="row" style="gap:10px"><span class="pill good">Ready</span><b>${esc(chosen)}</b></div>
+      <p class="muted" style="margin:0">Tap <b>Print receipt</b> on any sale to print it here.</p>`
+    : `${chosen ? `<p style="margin:0"><b>${esc(chosen)}</b> is not on this computer any more. Pick the receipt printer again.</p>` : ''}
+      ${options.length ? `<label class="field"><span>Printer</span><select id="pr-pick">${options.map(p => `<option>${esc(p.name)}</option>`).join('')}</select></label>
+      <p class="muted small" style="margin:0">Not in the list? Install the driver that came with the printer, then open this again.</p>`
+      : '<p style="margin:0">No printers are installed on this computer. Install the driver that came with the receipt printer, then open this again.</p>'}`}
+    <div class="err" id="pr-err"></div>
+  </div>
+  <div class="modal-f">
+    ${chosen ? '<button class="btn danger" id="pr-off" style="margin-right:auto">Stop using it</button>' : ''}
+    ${ready ? `<button class="btn" id="pr-test">${icon('print')}Print test</button>` : options.length ? '<button class="btn primary" id="pr-use">Use this printer</button>' : ''}
+    <button class="btn ${ready ? 'primary' : ''}" data-close>Done</button>
+  </div>`);
+  const use = $('#pr-use', m); if (use) use.addEventListener('click', () => {
+    writeKey(PRINTER_NAME_KEY, $('#pr-pick', m).value);
+    toast('Receipt printer set', 'good');
+    printerModal();
+  });
+  const test = $('#pr-test', m); if (test) test.addEventListener('click', () => printReceipt(testReceipt(), test));
+  const off = $('#pr-off', m); if (off) off.addEventListener('click', () => {
+    writeKey(PRINTER_NAME_KEY, '');
+    toast('This computer no longer uses the receipt printer.');
+    printerModal();
+  });
+}
+
+// Chrome or Edge: the printer is reached over WebUSB.
+async function usbPrinterModal() {
   const on = usesPrinter();
   const dev = on ? await findPrinter() : null;
   const m = openModal(`${mHead('Receipt printer')}
@@ -1136,7 +1210,7 @@ async function printerModal() {
   const off = $('#pr-off', m); if (off) off.addEventListener('click', async () => {
     const d = await findPrinter();
     if (d && d.forget) await d.forget().catch(() => {});
-    setUsesPrinter(false);
+    writeKey(PRINTER_KEY, '');
     toast('This computer no longer uses the receipt printer.');
     printerModal();
   });
@@ -1150,12 +1224,12 @@ async function connectPrinter(m) {
     // Open it once now, so a Windows driver problem shows up here and not in the middle of a sale.
     await dev.open();
     await dev.close();
-    setUsesPrinter(true);
+    writeKey(PRINTER_KEY, '1');
     toast('Receipt printer connected', 'good');
     printerModal();
   } catch (e) { err.textContent = printerError(e); }
 }
-if (hasUsb()) ['connect', 'disconnect'].forEach(ev => navigator.usb.addEventListener(ev, () => { if ($('#pr-b')) printerModal(); }));
+if (hasUsb() && !desktop) ['connect', 'disconnect'].forEach(ev => navigator.usb.addEventListener(ev, () => { if ($('#pr-b')) printerModal(); }));
 
 function paymentModal(s) {
   const m = openModal(`${mHead('Record payment')}
