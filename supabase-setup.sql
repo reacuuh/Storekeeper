@@ -43,6 +43,10 @@ create table if not exists public.products (
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
 );
+-- The price before the last change, and when it changed. A sale made without internet
+-- before the change keeps the price printed on its receipt (see create_sale).
+alter table public.products add column if not exists prev_price numeric(14,2);
+alter table public.products add column if not exists price_changed_at timestamptz;
 
 create table if not exists public.customers (
   id          uuid primary key default gen_random_uuid(),
@@ -178,6 +182,18 @@ create or replace function private.log(p_me public.profiles, p_kind text, p_mess
 returns void language sql security definer set search_path = '' as $$
   insert into public.activity (user_id, user_name, user_code, user_role, kind, message, ref)
   values (p_me.id, p_me.name, p_me.staff_code, p_me.role, p_kind, p_message, p_ref);
+$$;
+
+-- When something saved without internet really happened, as the device reports it.
+-- Never in the future and never more than 7 days back, so a wrong clock can't move it far.
+create or replace function private.made_at(p timestamptz) returns timestamptz
+language sql stable set search_path = '' as $$
+  select case when p is null then now() else least(greatest(p, now() - interval '7 days'), now()) end;
+$$;
+
+create or replace function private.lagos_time(t timestamptz) returns text
+language sql stable set search_path = '' as $$
+  select to_char(t at time zone 'Africa/Lagos', 'FMDD Mon, HH24:MI');
 $$;
 
 -- Creates a Supabase login (auth user) for a username + password.
@@ -342,7 +358,9 @@ begin
   end if;
 
   update public.products
-     set name = v_name, unit = v_unit, price = p_price, qty = coalesce(p_qty, qty), updated_at = now()
+     set name = v_name, unit = v_unit, price = p_price, qty = coalesce(p_qty, qty), updated_at = now(),
+         prev_price       = case when p_price <> price then price else prev_price end,
+         price_changed_at = case when p_price <> price then now() else price_changed_at end
    where id = p_id
   returning * into v_new;
 
@@ -372,7 +390,11 @@ begin
   if p_price is null or p_price < 0 then raise exception 'Enter a price of 0 or more.'; end if;
   select * into v_old from public.products where id = p_id and not archived for update;
   if not found then raise exception 'Product not found.'; end if;
-  update public.products set price = p_price, updated_at = now() where id = p_id returning * into v_new;
+  update public.products
+     set price = p_price, updated_at = now(),
+         prev_price       = case when p_price <> price then price else prev_price end,
+         price_changed_at = case when p_price <> price then now() else price_changed_at end
+   where id = p_id returning * into v_new;
   if v_new.price <> v_old.price then
     perform private.log(v_me, 'price',
       format('Changed price of %s: %s → %s per %s', v_new.name, private.naira(v_old.price), private.naira(v_new.price), v_new.unit), p_id);
@@ -391,54 +413,88 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+--  SAVING WITHOUT INTERNET
+--  Sales, stock received and payments made without internet wait on the
+--  device and are sent later. For these three functions:
+--  * p_client_id is the id the app picked for the new row. If it is sent
+--    twice (the answer got lost), it is only saved once.
+--  * p_made_at is set when it was saved on the device first. It is when it
+--    really happened, and the change is marked "made offline" in the log.
+-- ---------------------------------------------------------------------
+
+-- These used to have fewer parameters. Remove the old versions so only one of each exists.
+drop function if exists public.receive_stock(uuid, integer, numeric, text, text);
+drop function if exists public.create_sale(jsonb, text, numeric, text, text, text);
+drop function if exists public.record_payment(uuid, numeric, text);
+
+-- ---------------------------------------------------------------------
 --  STOCK RECEIVED (owner and staff)
 -- ---------------------------------------------------------------------
 create or replace function public.receive_stock(
-  p_product uuid, p_qty integer, p_cost numeric default null, p_supplier text default null, p_note text default null
+  p_product uuid, p_qty integer, p_cost numeric default null, p_supplier text default null, p_note text default null,
+  p_client_id uuid default null, p_made_at timestamptz default null
 ) returns void language plpgsql security definer set search_path = '' as $$
 declare
-  v_me  public.profiles := private.me();
-  v_p   public.products;
-  v_sup text := nullif(trim(coalesce(p_supplier, '')), '');
+  v_me   public.profiles := private.me();
+  v_p    public.products;
+  v_sup  text := nullif(trim(coalesce(p_supplier, '')), '');
+  v_when timestamptz := private.made_at(p_made_at);
 begin
   if p_qty is null or p_qty <= 0 then raise exception 'Enter how many came in.'; end if;
   if p_cost is not null and p_cost < 0 then raise exception 'Cost cannot be below 0.'; end if;
+  -- Two copies arriving together: the second one fails on the id below and changes nothing.
+  if p_client_id is not null and exists (select 1 from public.stock_ins where id = p_client_id) then return; end if;
+  -- Goods that arrived while the device was offline still count if the product was removed meanwhile.
   update public.products set qty = qty + p_qty, updated_at = now()
-   where id = p_product and not archived
+   where id = p_product and (not archived or p_made_at is not null)
   returning * into v_p;
   if not found then raise exception 'Product not found.'; end if;
-  insert into public.stock_ins (product_id, product_name, unit, qty, cost_per_unit, supplier, note,
-                                received_by, received_by_name, received_by_code)
-  values (v_p.id, v_p.name, v_p.unit, p_qty, p_cost, v_sup, nullif(trim(coalesce(p_note, '')), ''),
-          v_me.id, v_me.name, v_me.staff_code);
+  insert into public.stock_ins (id, product_id, product_name, unit, qty, cost_per_unit, supplier, note,
+                                received_by, received_by_name, received_by_code, created_at)
+  values (coalesce(p_client_id, gen_random_uuid()), v_p.id, v_p.name, v_p.unit, p_qty, p_cost, v_sup, nullif(trim(coalesce(p_note, '')), ''),
+          v_me.id, v_me.name, v_me.staff_code, v_when);
   perform private.log(v_me, 'stock',
-    format('Received %s of %s%s', private.units(p_qty, v_p.unit), v_p.name, case when v_sup is not null then ' from ' || v_sup else '' end), v_p.id);
+    format('Received %s of %s%s%s', private.units(p_qty, v_p.unit), v_p.name,
+           case when v_sup is not null then ' from ' || v_sup else '' end,
+           case when p_made_at is not null then ' · made offline ' || private.lagos_time(v_when) else '' end), v_p.id);
 end $$;
 
 -- ---------------------------------------------------------------------
 --  SALES (owner and staff)
 --  p_items: [{"product_id": "...", "qty": 10, "price": 1200}]
 --  Staff always sell at the list price. The owner may give a special price.
+--  A sale made without internet (p_made_at set) has already happened: the
+--  goods are gone and the customer has a receipt. So a stock count that is
+--  too low doesn't stop it (stock stops at 0 and the owner gets a note), and
+--  if the owner changed the price after the sale, the receipt's price stays.
 -- ---------------------------------------------------------------------
 create or replace function public.create_sale(
   p_items jsonb, p_method text, p_amount_paid numeric,
-  p_customer_name text default null, p_customer_phone text default null, p_note text default null
+  p_customer_name text default null, p_customer_phone text default null, p_note text default null,
+  p_client_id uuid default null, p_made_at timestamptz default null
 ) returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   v_me      public.profiles := private.me();
+  v_offline boolean := p_made_at is not null;
+  v_when    timestamptz := private.made_at(p_made_at);
+  v_old     public.sales;
   v_item    record;
   v_prod    public.products;
   v_qty     integer;
   v_price   numeric(14,2);
+  v_asked   numeric;
   v_lines   jsonb := '[]'::jsonb;
   v_total   numeric(14,2) := 0;
   v_paid    numeric(14,2);
-  v_sale_id uuid := gen_random_uuid();
+  v_sale_id uuid := coalesce(p_client_id, gen_random_uuid());
   v_invoice text;
   v_cust    uuid;
   v_name    text := nullif(trim(coalesce(p_customer_name, '')), '');
   v_phone   text := nullif(trim(coalesce(p_customer_phone, '')), '');
   v_desc    text;
+  v_notes   text[] := '{}';
+  v_short   jsonb := '[]'::jsonb;
+  v_s       jsonb;
 begin
   if p_method is null or p_method not in ('cash', 'transfer', 'pos', 'credit') then
     raise exception 'Choose how the customer is paying.';
@@ -453,25 +509,42 @@ begin
    order by id
    for update;
 
+  -- Sent before? Checked after the locks, so two copies arriving together are
+  -- handled one after the other and the second one finds the first.
+  if p_client_id is not null then
+    select * into v_old from public.sales where id = p_client_id;
+    if found then
+      if v_old.sold_by <> v_me.id then raise exception 'This sale could not be saved. Try again.'; end if;
+      return jsonb_build_object('id', v_old.id, 'invoice_no', v_old.invoice_no);
+    end if;
+  end if;
+
   for v_item in select t.e, t.ord from jsonb_array_elements(p_items) with ordinality as t(e, ord) order by t.ord loop
     v_qty := (v_item.e->>'qty')::integer;
     if v_qty is null or v_qty <= 0 then raise exception 'Every item needs a quantity of at least 1.'; end if;
 
-    select * into v_prod from public.products where id = (v_item.e->>'product_id')::uuid and not archived;
+    select * into v_prod from public.products where id = (v_item.e->>'product_id')::uuid and (not archived or v_offline);
     if not found then raise exception 'A product in this sale is no longer on the list. Remove it and try again.'; end if;
 
     if v_prod.qty < v_qty then
-      raise exception 'Only % of % left in stock.', private.units(v_prod.qty, v_prod.unit), v_prod.name;
+      if not v_offline then
+        raise exception 'Only % of % left in stock.', private.units(v_prod.qty, v_prod.unit), v_prod.name;
+      end if;
+      v_short := v_short || jsonb_build_array(jsonb_build_object('id', v_prod.id, 'name', v_prod.name, 'unit', v_prod.unit, 'had', v_prod.qty, 'sold', v_qty));
     end if;
 
-    if v_me.role = 'owner' and jsonb_typeof(v_item.e->'price') = 'number' then
-      v_price := (v_item.e->>'price')::numeric;
-    else
-      v_price := v_prod.price;
+    v_price := v_prod.price;
+    if jsonb_typeof(v_item.e->'price') = 'number' then
+      v_asked := (v_item.e->>'price')::numeric;
+      if v_me.role = 'owner' or (v_offline and v_asked = v_prod.prev_price and v_when < v_prod.price_changed_at) then
+        v_price := v_asked;
+      elsif v_offline and v_asked <> v_prod.price then
+        v_notes := v_notes || format('%s was %s on the receipt but is saved at %s', v_prod.name, private.naira(v_asked), private.naira(v_prod.price));
+      end if;
     end if;
     if v_price < 0 then raise exception 'Price cannot be below 0.'; end if;
 
-    update public.products set qty = qty - v_qty, updated_at = now() where id = v_prod.id;
+    update public.products set qty = greatest(qty - v_qty, 0), updated_at = now() where id = v_prod.id;
 
     v_lines := v_lines || jsonb_build_array(jsonb_build_object(
       'product_id', v_prod.id, 'name', v_prod.name, 'unit', v_prod.unit, 'qty', v_qty,
@@ -493,48 +566,63 @@ begin
   v_invoice := 'INV-' || lpad(nextval('public.invoice_seq')::text, 5, '0');
 
   insert into public.sales (id, invoice_no, customer_id, customer_name, customer_phone, items, total,
-                            amount_paid, balance, method, note, sold_by, sold_by_name, sold_by_code)
+                            amount_paid, balance, method, note, sold_by, sold_by_name, sold_by_code, created_at)
   values (v_sale_id, v_invoice, v_cust, v_name, v_phone, v_lines, v_total,
           v_paid, v_total - v_paid, p_method, nullif(trim(coalesce(p_note, '')), ''),
-          v_me.id, v_me.name, v_me.staff_code);
+          v_me.id, v_me.name, v_me.staff_code, v_when);
 
   if v_paid > 0 then
-    insert into public.payments (sale_id, amount, method, received_by, received_by_name)
-    values (v_sale_id, v_paid, case when p_method = 'credit' then 'cash' else p_method end, v_me.id, v_me.name);
+    insert into public.payments (sale_id, amount, method, received_by, received_by_name, created_at)
+    values (v_sale_id, v_paid, case when p_method = 'credit' then 'cash' else p_method end, v_me.id, v_me.name, v_when);
   end if;
 
   select string_agg(private.units((t.l->>'qty')::integer, t.l->>'unit') || ' of ' || (t.l->>'name'), ', ')
     into v_desc from jsonb_array_elements(v_lines) as t(l);
   perform private.log(v_me, 'sale',
-    format('Sold %s to %s for %s%s · %s', v_desc, coalesce(v_name, 'a walk-in customer'), private.naira(v_total),
-           case when v_total > v_paid then ' (owes ' || private.naira(v_total - v_paid) || ')' else '' end, v_invoice),
+    format('Sold %s to %s for %s%s · %s%s%s', v_desc, coalesce(v_name, 'a walk-in customer'), private.naira(v_total),
+           case when v_total > v_paid then ' (owes ' || private.naira(v_total - v_paid) || ')' else '' end, v_invoice,
+           case when v_offline then ' · made offline ' || private.lagos_time(v_when) else '' end,
+           case when cardinality(v_notes) > 0 then ' · ' || array_to_string(v_notes, '; ') else '' end),
     v_sale_id);
+
+  for v_s in select t.e from jsonb_array_elements(v_short) as t(e) loop
+    perform private.log(v_me, 'adjust',
+      format('%s: the count showed %s, but %s (made offline) sold %s. Stock set to 0. Please check the shelf.',
+             v_s->>'name', private.units((v_s->>'had')::integer, v_s->>'unit'), v_invoice,
+             private.units((v_s->>'sold')::integer, v_s->>'unit')),
+      (v_s->>'id')::uuid);
+  end loop;
 
   return jsonb_build_object('id', v_sale_id, 'invoice_no', v_invoice);
 end $$;
 
 -- Money received later for a sale that was not fully paid (owner only)
-create or replace function public.record_payment(p_sale uuid, p_amount numeric, p_method text) returns void
-language plpgsql security definer set search_path = '' as $$
+create or replace function public.record_payment(
+  p_sale uuid, p_amount numeric, p_method text, p_client_id uuid default null, p_made_at timestamptz default null
+) returns void language plpgsql security definer set search_path = '' as $$
 declare
-  v_me  public.profiles := private.require_owner();
-  v_s   public.sales;
-  v_amt numeric(14,2);
+  v_me   public.profiles := private.require_owner();
+  v_s    public.sales;
+  v_amt  numeric(14,2);
+  v_when timestamptz := private.made_at(p_made_at);
 begin
   if p_method is null or p_method not in ('cash', 'transfer', 'pos') then raise exception 'Choose how the customer paid.'; end if;
   select * into v_s from public.sales where id = p_sale for update;
   if not found then raise exception 'Invoice not found.'; end if;
+  -- Sent before? (Checked before "fully paid", which the first copy may have caused.)
+  if p_client_id is not null and exists (select 1 from public.payments where id = p_client_id) then return; end if;
   if v_s.status = 'void' then raise exception 'This sale was cancelled.'; end if;
   if v_s.balance <= 0 then raise exception 'This invoice is already fully paid.'; end if;
   v_amt := least(coalesce(p_amount, 0), v_s.balance);
   if v_amt <= 0 then raise exception 'Enter the amount received.'; end if;
 
   update public.sales set amount_paid = amount_paid + v_amt, balance = balance - v_amt where id = p_sale;
-  insert into public.payments (sale_id, amount, method, received_by, received_by_name)
-  values (p_sale, v_amt, p_method, v_me.id, v_me.name);
+  insert into public.payments (id, sale_id, amount, method, received_by, received_by_name, created_at)
+  values (coalesce(p_client_id, gen_random_uuid()), p_sale, v_amt, p_method, v_me.id, v_me.name, v_when);
   perform private.log(v_me, 'payment',
-    format('Received %s from %s for %s%s', private.naira(v_amt), coalesce(v_s.customer_name, 'a customer'), v_s.invoice_no,
-           case when v_s.balance - v_amt > 0 then ' (still owes ' || private.naira(v_s.balance - v_amt) || ')' else ' (fully paid)' end),
+    format('Received %s from %s for %s%s%s', private.naira(v_amt), coalesce(v_s.customer_name, 'a customer'), v_s.invoice_no,
+           case when v_s.balance - v_amt > 0 then ' (still owes ' || private.naira(v_s.balance - v_amt) || ')' else ' (fully paid)' end,
+           case when p_made_at is not null then ' · made offline ' || private.lagos_time(v_when) else '' end),
     p_sale);
 end $$;
 

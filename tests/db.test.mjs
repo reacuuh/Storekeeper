@@ -231,6 +231,66 @@ ok((await as('authenticated', STAFF, 'select * from public.sales')).rows.length 
 const pub = (await sys(`select tablename from pg_publication_tables where pubname='supabase_realtime' order by 1`)).map(r => r.tablename);
 ok(pub.length === 7, 'live updates enabled on 7 tables', pub.join(','));
 
+console.log('\nSaving twice, and saving without internet');
+const sendSale = (who, items, paid, clientId, madeAt = null, name = null) =>
+  one('authenticated', who, `select public.create_sale(p_items => $1::jsonb, p_method => 'cash', p_amount_paid => $2,
+    p_customer_name => $3, p_client_id => $4, p_made_at => $5) as r`, [JSON.stringify(items), paid, name, clientId, madeAt]);
+const minutesAgo = m => new Date(Date.now() - m * 60000).toISOString();
+const saleRow = async id => (await sys(`select * from public.sales where id=$1`, [id]))[0];
+
+await as('authenticated', OWNER, `select public.receive_stock($1, 50)`, [P1]);
+let start1 = await stock(P1);
+const ID1 = crypto.randomUUID();
+const first = (await sendSale(STAFF, [{ product_id: P1, qty: 2 }], 3200, ID1)).r;
+const second = (await sendSale(STAFF, [{ product_id: P1, qty: 2 }], 3200, ID1)).r;
+ok(first.id === ID1 && second.invoice_no === first.invoice_no && (await stock(P1)) === start1 - 2, 'a sale sent twice is saved once, with the id the app picked');
+const stolen = await err('authenticated', STAFF2, `select public.create_sale(p_items => $1::jsonb, p_method => 'cash', p_amount_paid => 0, p_client_id => $2)`,
+  [JSON.stringify([{ product_id: P1, qty: 1 }]), ID1]);
+ok(stolen && stolen.includes('could not be saved'), "someone else's sale id is refused", stolen);
+
+start1 = await stock(P1);
+const shortSale = (await sendSale(STAFF, [{ product_id: P1, qty: start1 + 5 }], 0, crypto.randomUUID(), minutesAgo(60), 'Mama Chidi')).r;
+const shortRow = await saleRow(shortSale.id);
+ok((await stock(P1)) === 0, 'offline sale bigger than the stock count is saved, and stock stops at 0');
+ok(Math.abs(new Date(shortRow.created_at) - (Date.now() - 3600000)) < 5000, 'offline sale is dated when it was made, not when it was sent');
+const shortNote = (await sys(`select message from public.activity where kind = 'adjust' order by id desc limit 1`))[0].message;
+ok(shortNote.includes('Stock set to 0') && shortNote.includes(shortSale.invoice_no), 'owner gets a note to check the shelf', shortNote);
+ok((await sys(`select message from public.activity where ref = $1 and kind = 'sale'`, [shortSale.id]))[0].message.includes('made offline'), 'sale is marked "made offline" in the log');
+
+await as('authenticated', OWNER, `select public.receive_stock($1, 100)`, [P1]);
+const before1700 = minutesAgo(10);
+await as('authenticated', OWNER, `select public.set_price($1, 1700)`, [P1]);
+const keep = (await sendSale(STAFF, [{ product_id: P1, qty: 2, price: 1600 }], 3200, crypto.randomUUID(), before1700)).r;
+ok(Number((await saleRow(keep.id)).total) === 3200, 'offline sale made before a price change keeps the price on its receipt');
+const after = (await sendSale(STAFF, [{ product_id: P1, qty: 2, price: 1600 }], 3200, crypto.randomUUID(), new Date().toISOString(), 'Late Buyer')).r;
+const afterRow = await saleRow(after.id);
+ok(Number(afterRow.total) === 3400 && Number(afterRow.balance) === 200, 'offline sale made after the change is saved at the new price', `${afterRow.total} ${afterRow.balance}`);
+const afterLog = (await sys(`select message from public.activity where ref = $1`, [after.id]))[0].message;
+ok(afterLog.includes('₦1,600 on the receipt'), 'the price difference is noted in the log', afterLog);
+const madeUp = (await sendSale(STAFF, [{ product_id: P1, qty: 1, price: 5 }], 5, crypto.randomUUID(), before1700, 'Chancer')).r;
+ok(Number((await saleRow(madeUp.id)).total) === 1700, 'staff cannot pick any other price, even offline');
+const future = (await sendSale(STAFF, [{ product_id: P1, qty: 1 }], 1700, crypto.randomUUID(), new Date(Date.now() + 2 * 86400000).toISOString())).r;
+ok(new Date((await saleRow(future.id)).created_at) <= new Date(), 'a device clock in the future is not believed');
+const old = (await sendSale(STAFF, [{ product_id: P1, qty: 1 }], 1700, crypto.randomUUID(), minutesAgo(30 * 24 * 60))).r;
+ok(Math.abs(new Date((await saleRow(old.id)).created_at) - (Date.now() - 7 * 86400000)) < 60000, 'a date more than 7 days back is moved to 7 days back');
+
+const ST = crypto.randomUUID(), p1b = await stock(P1);
+for (let i = 0; i < 2; i++) await as('authenticated', STAFF, `select public.receive_stock(p_product => $1, p_qty => 10, p_client_id => $2, p_made_at => $3)`, [P1, ST, minutesAgo(5)]);
+ok((await stock(P1)) === p1b + 10 && (await sys(`select count(*)::int c from public.stock_ins where id = $1`, [ST]))[0].c === 1, 'stock received sent twice is saved once');
+
+const PAY = crypto.randomUUID();
+for (let i = 0; i < 2; i++) await as('authenticated', OWNER, `select public.record_payment(p_sale => $1, p_amount => 200, p_method => 'cash', p_client_id => $2, p_made_at => $3)`, [after.id, PAY, minutesAgo(1)]);
+const paidRow = await saleRow(after.id);
+ok(Number(paidRow.balance) === 0 && (await sys(`select count(*)::int c from public.payments where id = $1`, [PAY]))[0].c === 1, 'payment sent twice is saved once (no "already paid" error the second time)');
+
+const archivedOnline = await err('authenticated', STAFF, `select public.create_sale($1::jsonb, 'cash', 0)`, [JSON.stringify([{ product_id: P2, qty: 1 }])]);
+ok(archivedOnline && archivedOnline.includes('no longer on the list'), 'removed product cannot be sold online', archivedOnline);
+const archivedOffline = (await sendSale(STAFF, [{ product_id: P2, qty: 1 }], 2400.5, crypto.randomUUID(), minutesAgo(2))).r;
+ok(!!archivedOffline.invoice_no, 'a sale of a removed product made offline (before it was removed) is still saved');
+for (const fn of ['create_sale', 'receive_stock', 'record_payment']) {
+  ok((await sys(`select count(*)::int c from pg_proc where proname = $1`, [fn]))[0].c === 1, `only one version of ${fn} exists`);
+}
+
 console.log('\nActivity log (as the owner sees it):');
 for (const a of (await as('authenticated', OWNER, 'select user_code, kind, message from public.activity order by id')).rows) {
   console.log(`   [${a.user_code}] ${a.kind.padEnd(8)} ${a.message}`);
