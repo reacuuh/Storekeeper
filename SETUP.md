@@ -64,7 +64,7 @@ Do this right after putting the app online. Until the owner account exists, anyo
 
 ## 7. Install it on the computer and on her phone
 
-- **Warehouse computer (Chrome or Edge):** open the web address, then click the **install** icon at the right end of the address bar (or the ⋮ menu → **Install** / **Save and share → Install page as app**). It then opens from the desktop like normal software.
+- **Warehouse computer:** install the Windows app (step 9). It prints receipts straight to the receipt printer. Installing from Chrome or Edge also works (open the web address, then click the **install** icon at the right end of the address bar), but then printing goes through the print window.
 - **Android phone (Chrome):** open the web address, tap ⋮ → **Add to Home screen** → **Install**.
 - **iPhone (Safari):** open the web address, tap the **Share** button → **Add to Home Screen**.
 
@@ -76,11 +76,42 @@ As the owner:
 2. On the product, tap **Add stock** and enter how many you have. Do the same whenever goods arrive.
 3. **Staff → Add staff.** Enter a name, username and password. The app gives each person a staff ID (STF-001, STF-002 …) and shows the login details to hand over.
 
-## 9. Receipt printer (Xprinter XP-Q200)
+## 9. The Windows app and the receipt printer (Xprinter XP-Q200)
 
-The app prints receipts straight to a USB receipt printer, and the paper cuts itself. This works in **Chrome or Edge** on the warehouse computer. Do this once on each computer that has the printer.
+The Windows app shows the same screens as the website and updates by itself whenever the website changes. It also prints receipts straight to the receipt printer through the printer's normal driver: the receipt comes out exactly as it looks in the app, and the paper is cut right after it.
 
-**First, a one-time driver swap (Windows only).** Windows normally keeps the printer to itself, so the browser can't reach it. A free tool called Zadig hands it over:
+**Install it:**
+
+1. Copy the installer, `Warehouse-Manager-Setup-1.0.0.exe`, onto the warehouse computer. (It's made from the `desktop` folder; see "Making a new installer" below.)
+2. Double-click it. Windows may say **Windows protected your PC**, because the app isn't signed by a company. Click **More info**, then **Run anyway**.
+3. It installs in a few seconds and opens. After that, open **Warehouse Manager** from the desktop or the Start menu.
+
+**Set up the printer:**
+
+1. Plug the printer in and switch it on. It must appear in Windows under **Settings → Bluetooth & devices → Printers & scanners**; the Xprinter driver usually calls it **XP-80C**. If it isn't there, install the driver that came with the printer.
+2. In the app, click **Receipt printer** at the bottom of the left menu.
+3. The receipt printer is already picked in the list. Click **Use this printer**, then **Print test**. A short test slip should print and cut.
+
+From now on, **Print receipt** on any invoice prints straight away, with no print window.
+
+### Making a new installer
+
+Only needed when something in the `desktop` folder changes. Website changes reach the Windows app by themselves.
+
+```
+cd desktop
+npm install
+npm run check
+npm run dist
+```
+
+`npm run check` sends a test job through Windows into a file, so nothing is printed. `npm run dist` makes the installer in `desktop/dist`. Raise `version` in `desktop/package.json` first, so the new installer has a new name.
+
+### Printing from Chrome or Edge instead
+
+Without the Windows app, **Print receipt** opens the print window with just the receipt, on an 80mm page as long as the receipt. How much paper comes out also depends on the paper size chosen for the printer in that window.
+
+Chrome and Edge can print straight to the printer too, but only after a one-time driver swap that hands the printer over to the browser. **Don't do this on a computer that uses the Windows app**: the app needs the normal driver. To do the swap, use a free tool called Zadig:
 
 1. Plug the printer's USB cable into the computer and switch the printer on.
 2. Download Zadig from **zadig.akeo.ie** and open it. Click **Yes** if Windows asks for permission.
@@ -91,14 +122,14 @@ The app prints receipts straight to a USB receipt printer, and the paper cuts it
 
 After this, the printer only prints from Chrome or Edge, not from other programs such as Word. To undo it, open **Device Manager**, right-click the printer, choose **Uninstall device** and tick **Attempt to remove the driver**. Then unplug the printer, plug it back in and install the Xprinter driver again.
 
-**Then connect it in the app:**
+**Then connect it in the browser:**
 
-1. Open the app and log in.
+1. Open the web address and log in.
 2. Click **Receipt printer** at the bottom of the left menu (on a phone it's under **More**).
 3. Click **Connect printer**, pick the printer from the list and click **Connect**.
 4. Click **Print test**. A short test slip should print and cut.
 
-From now on, every invoice on this computer has a **Print receipt** button. If the app says the printer isn't connected, check it's switched on and plugged in.
+From now on, **Print receipt** on this computer prints straight away. If the app says the printer isn't connected, check it's switched on and plugged in.
 
 An Android phone or tablet with Chrome can use the printer too, through a USB OTG cable, and doesn't need the driver swap. iPhones can't use USB printers from a web app.
 

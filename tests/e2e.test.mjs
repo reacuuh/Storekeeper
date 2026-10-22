@@ -71,7 +71,7 @@ function fakeUsbPrinter() {
 }
 // A pretend Windows app (desktop/preload.js) with two installed printers. Keeps the jobs it was given.
 function fakeWindowsApp() {
-  const desk = window.__desk = { printers: [{ name: 'Microsoft Print to PDF', isDefault: true }, { name: 'XP-80C', isDefault: false }], jobs: [] };
+  const desk = window.__desk = { printers: [{ name: 'Microsoft Print to PDF' }, { name: 'XP-80C' }], jobs: [] };
   window.desktop = {
     printers: async () => desk.printers,
     async print(name, bytes) {

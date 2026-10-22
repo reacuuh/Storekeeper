@@ -2,3 +2,5 @@ tests/node_modules/
 tests/shots/
 tests/.pgdata-*
 .DS_Store
+desktop/node_modules/
+desktop/dist/

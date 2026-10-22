@@ -1,0 +1,41 @@
+{
+  "name": "storekeeper-desktop",
+  "productName": "Warehouse Manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Windows app for the warehouse: shows the live site and prints receipts through the Windows printer driver.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node check-print.js",
+    "dist": "electron-builder --win nsis"
+  },
+  "dependencies": {
+    "koffi": "3.3.3"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "app.netlify.ashipastorekeeper",
+    "productName": "Warehouse Manager",
+    "files": [
+      "main.js",
+      "preload.js",
+      "rawprint.js",
+      "offline.html"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "npmRebuild": false,
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "artifactName": "Warehouse-Manager-Setup-${version}.${ext}",
+      "shortcutName": "Warehouse Manager"
+    }
+  }
+}

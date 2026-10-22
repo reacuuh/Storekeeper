@@ -28,11 +28,24 @@ Stock, bulk sales and staff app for a family water and provisions warehouse in L
 
 ### The receipt printer
 
-- An Xprinter XP-Q200 (80mm, ESC/POS) on USB at the warehouse computer. The code is the "Receipt printer" section of `app/app.js`.
-- It uses WebUSB, so only Chrome and Edge (and Chrome on Android) can print to it. On Windows the printer's driver has to be swapped for WinUSB with Zadig first (SETUP.md, step 9). Without that, `open()` fails with "Access denied".
-- Receipts are drawn on a canvas and sent as a picture (`GS v 0`, 576 dots wide), then `GS V B` cuts the paper. Don't switch to text mode: the printer's fonts have no ₦.
-- Whether a computer uses the printer is kept in `localStorage` (`receiptPrinter`), because the printer belongs to a computer, not a login. Without it, Print opens the normal print window.
-- `test:e2e` swaps in a fake USB printer and saves what it printed as pictures in `tests/shots/` (`10-receipt.png`, `11-receipt-cancelled.png`). Look at them after changing the receipt.
+- An Xprinter XP-Q200 (80mm, ESC/POS) on USB at the warehouse computer. Its Windows driver names it "XP-80C". The code is the "Receipt printer" section of `app/app.js`.
+- `receiptCanvas()` draws the receipt as a black-and-white picture, 576 dots wide. Don't switch to the printer's text mode: its fonts have no ₦.
+- Print receipt picks one of three ways, in this order:
+  1. In the Windows app (`window.desktop` exists): a RAW job to the Windows printer saved in `localStorage` `receiptPrinterName`.
+  2. In Chrome or Edge with a USB printer connected (`localStorage` `receiptPrinter` is `'1'`): WebUSB. On Windows that needs the Zadig driver swap (SETUP.md, step 9); without it `open()` fails with "Access denied".
+  3. Otherwise `printInBrowser()`: the print window with only the receipt picture, on one 80mm page as long as the receipt.
+- Ways 1 and 2 send the picture as `GS v 0` bands, then `GS V B` cuts the paper.
+- The printer choice is kept in `localStorage` because the printer belongs to a computer, not a login.
+- `test:e2e` fakes both the USB printer and the Windows app. It saves what they were sent as pictures (`tests/shots/10-receipt.png`, `11-receipt-cancelled.png`) and what the print window gets as `14-print-window.pdf`. Look at them after changing the receipt.
+
+### The Windows app: `desktop/`
+
+- Electron, with its own `package.json` like `tests/`. It opens the live site (`SITE` in `desktop/main.js`), so website changes reach it without a new installer. Only changes inside `desktop/` need one: raise `version`, then `npm run dist`.
+- `desktop/preload.js` gives the site `window.desktop` with `printers()`, `print(name, bytes)` and `retry()`. That is the whole bridge; keep it small.
+- `desktop/main.js` only answers `printers` and `print` for pages on the site's own origin, only prints to printers installed in Windows, opens every other link in the normal browser, and refuses all permission requests. Keep those checks.
+- `desktop/rawprint.js` sends the bytes as a RAW job through `winspool.drv` (via koffi), so the driver passes the ESC/POS commands through untouched.
+- `npm run check` in `desktop/` tests `rawprint.js` by printing to Windows' "Generic / Text Only" printer with the output sent to a file. Never test by printing to a real printer queue: the job waits there and prints the next time the printer is switched on.
+- The installer isn't code-signed, so Windows shows "Windows protected your PC" the first time.
 
 ### The database: `supabase-setup.sql`
 

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Warehouse Manager</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f2f5f7; --card: #fff; --ink: #12222d; --ink-2: #4c606d; --accent: #0a7bb5; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0c161d; --card: #13212b; --ink: #e4edf2; --ink-2: #9cb2bf; --accent: #3fb0e8; } }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font: 17px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 420px; margin: 16px; padding: 28px; border-radius: 16px; background: var(--card); display: grid; gap: 14px; }
+  h1 { margin: 0; font-size: 24px; }
+  p { margin: 0; color: var(--ink-2); }
+  button { min-height: 54px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font: 600 18px "Segoe UI", system-ui, sans-serif; cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>No internet</h1>
+  <p>The app could not reach the warehouse website. Check that this computer is connected to the internet.</p>
+  <p>It tries again by itself every 30 seconds.</p>
+  <button id="retry">Try again</button>
+</main>
+<script>
+  const retry = () => window.desktop.retry();
+  document.getElementById('retry').addEventListener('click', retry);
+  setTimeout(retry, 30000);
+</script>
+</body>
+</html>
