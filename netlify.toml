@@ -1,0 +1,9 @@
+# Netlify publishes the app/ folder as it is. There is no build step.
+[build]
+  publish = "app"
+
+# Let installed copies of the app pick up updates straight away.
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"

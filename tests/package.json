@@ -1,0 +1,17 @@
+{
+  "name": "warehouse-manager-tests",
+  "private": true,
+  "type": "module",
+  "description": "Checks for the database rules and the whole app. Not part of the website.",
+  "scripts": {
+    "test": "npm run test:db && npm run test:e2e",
+    "test:db": "node db.test.mjs",
+    "test:e2e": "node e2e.test.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.3.16",
+    "embedded-postgres": "18.4.0-beta.17",
+    "pg": "8.23.1",
+    "playwright": "1.56.0"
+  }
+}
