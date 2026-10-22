@@ -8,6 +8,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const APP_DIR = fileURLToPath(new URL('../app/', import.meta.url)).replace(/\/$/, '');
@@ -18,7 +19,10 @@ export async function start({ port = 8099, setupSql }) {
   // embedded-postgres creates this folder itself (and, when run as root, a "postgres" user to own it).
   // It lives next to this file because that user must be able to reach it; the system temp folder may be private.
   const dataDir = fileURLToPath(new URL('./.pgdata-' + crypto.randomBytes(4).toString('hex'), import.meta.url));
-  const epg = new EmbeddedPostgres({ databaseDir: dataDir, user: 'postgres', password: 'password', port: 54329, persistent: false, createPostgresUser: true, onLog: () => {} });
+  // Only root needs the extra user. Otherwise embedded-postgres tries groupadd, which fails for normal users and on Windows.
+  // UTF8 is forced because Windows would otherwise pick WIN1252, which can't store the → used in activity log text.
+  const asRoot = os.userInfo().uid === 0;
+  const epg = new EmbeddedPostgres({ databaseDir: dataDir, user: 'postgres', password: 'password', port: 54329, persistent: false, createPostgresUser: asRoot, initdbFlags: ['--encoding=UTF8'], onLog: () => {} });
   await epg.initialise();
   await epg.start();
   await epg.createDatabase('app');
