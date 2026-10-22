@@ -47,6 +47,18 @@ Stock, bulk sales and staff app for a family water and provisions warehouse in L
 - `npm run check` in `desktop/` tests `rawprint.js` by printing to Windows' "Generic / Text Only" printer with the output sent to a file. Never test by printing to a real printer queue: the job waits there and prints the next time the printer is switched on.
 - The installer isn't code-signed, so Windows shows "Windows protected your PC" the first time.
 
+### Working without internet
+
+The owner chose this split (2026-10-22): sales, stock received and payments work offline; prices, products, staff, cancelling sales and logging in need internet.
+
+- `save()` in `app/app.js` writes each sale, delivery or payment to an outbox in `localStorage` (`outbox:<user id>`) first, then `sendWaiting()` sends them in order. Network errors, server errors and a login that hasn't been renewed yet leave an item waiting (`canRetry()`). Anything else the database refuses goes to `S.failed` and shows in the red bar.
+- Every item carries `p_client_id`, which becomes the new row's id, so a resend after a lost answer saves it once. Items the user was told are "waiting" also carry `p_made_at`. The database then treats them as already happened: a short stock count is flagged instead of refused, removed products still count, and staff keep the receipt's price if it was the price before the last change (`products.prev_price`, `price_changed_at`). `p_made_at` is kept within the last 7 days.
+- The screens show `S.base` (rows from the database, also saved as `cache:<user id>` so the app opens offline) plus the outbox, combined in `recompute()`. Never put waiting items into `S.base`.
+- Until a sale is sent it has no invoice number; receipts show `shortRef(id)` instead, which the Sales search also matches.
+- Logging out is blocked while anything is waiting, because waiting items are sent with that login.
+- `app/sw.js` only handles the app's own files. Data requests (`fetch()` calls) go straight to the network.
+- `test:e2e` goes offline with `ctx.setOffline()`, and fakes "online but the database can't be reached" by blocking `/rest/v1/` and `/auth/v1/` with `page.route()`.
+
 ### The database: `supabase-setup.sql`
 
 This one file is the whole database: tables, row level security, and every write as a SECURITY DEFINER function. The functions are `create_sale`, `receive_stock`, `save_product`, `set_price`, `record_payment`, `void_sale`, `create_staff`, `set_staff_active`, `reset_staff_password`, `archive_product`, `log_event`, `setup_owner` and `owner_exists`.

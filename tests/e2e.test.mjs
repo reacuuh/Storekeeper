@@ -416,6 +416,125 @@ try {
   ok((await page.evaluate(() => localStorage.getItem('receiptPrinterName'))) === null, '"Stop using it" forgets the printer');
   await ctx.close();
 
+  // ---------------- no internet ----------------
+  console.log('\nWorking without internet (staff on the warehouse computer)');
+  const noDatabase = /\/(rest|auth)\/v1\//;
+  ({ ctx, page } = await newPage());
+  await ctx.addInitScript(fakeWindowsApp);
+  await login(page, 'blessing', 'newbless9');
+  await page.waitForSelector('h1:text("My sales")');
+  await page.click('.rail [data-act="printer"]');
+  await page.click('#pr-use');
+  await page.click('.modal-f >> text=Done');
+  await page.click('[data-nav="products"] >> visible=true');
+  const countOf = async name => Number((await page.locator(`.pcard:has-text("${name}") .stockline b`).innerText()).replace(/,/g, ''));
+  const waterBefore = await countOf('Table water 75cl'), cokeBefore = await countOf('Coke 50cl');
+  await page.waitForTimeout(700); // what's loaded is kept on the device half a second later
+
+  await ctx.setOffline(true);
+  await page.click('[data-nav="sales"] >> visible=true');
+  await page.click('text=New sale');
+  await page.fill('#nf-c', 'Mama Tunde');
+  await page.locator('.line').nth(0).locator('.l-p').selectOption({ label: 'Table water 75cl · ₦1,600/carton' });
+  await page.locator('.line').nth(0).locator('.l-q').fill('3');
+  await page.selectOption('#nf-m', 'credit');
+  await page.click('#nf-save');
+  await page.waitForSelector('.toast:has-text("The sale is saved on this device")');
+  ok(await page.locator('.modal :text("Saved on this device")').isVisible(), 'a sale made without internet opens as a receipt that is not sent yet');
+  const ref = (await page.locator('.invoice .no').innerText()).replace('Receipt ', '');
+  ok(/^[0-9A-F]{8}$/.test(ref), 'it has a receipt number to find it by', ref);
+  await clearToasts(page);
+  await page.click('#iv-print');
+  await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
+  const offlineReceipt = readReceipt((await page.evaluate(() => window.__desk.jobs.splice(0)))[0].bytes);
+  ok(offlineReceipt !== null, 'its receipt prints without internet');
+  if (offlineReceipt) await receiptShot(page, offlineReceipt, '15-receipt-offline');
+  await page.click('.modal-f >> text=Done');
+  ok(await page.locator(`tr:has-text("${ref}") td.hide-sm .pill:text("Not sent yet")`).isVisible(), 'the sale is in the list, marked "Not sent yet"');
+
+  await page.click('[data-nav="stock"] >> visible=true');
+  await page.click('text=Receive stock');
+  await page.selectOption('#sf-p', await page.locator('#sf-p option', { hasText: 'Coke 50cl' }).getAttribute('value'));
+  await page.fill('#sf-q', '12');
+  await page.click('#sf button[type=submit]');
+  await page.waitForSelector('.toast:has-text("saved on this device")');
+  ok(await page.locator('tr:has-text("Coke 50cl") .pill:text("Not sent yet")').isVisible(), 'stock received without internet is listed as "Not sent yet"');
+  ok((await page.locator('#syncbar').innerText()).includes('2 changes saved on this device'), 'the bar at the top says 2 changes are waiting', await page.locator('#syncbar').innerText());
+  await page.click('[data-nav="products"] >> visible=true');
+  ok((await countOf('Table water 75cl')) === waterBefore - 3 && (await countOf('Coke 50cl')) === cokeBefore + 12, 'stock counts already include what is waiting');
+  await shot(page, '16-offline-products');
+  await page.locator('.rail [data-act="logout"]').click();
+  await page.waitForSelector('.toast:has-text("not sent yet")');
+  ok(await page.locator('.rail').isVisible(), 'cannot log out while changes are waiting');
+
+  // The computer is online, but the database can't be reached, and the app is opened again.
+  await page.route(noDatabase, r => r.abort('internetdisconnected'));
+  await ctx.setOffline(false);
+  await page.reload();
+  await page.waitForSelector('h1:text("My sales")');
+  ok(await page.locator(`tr:has-text("${ref}")`).first().isVisible() && (await page.locator('#syncbar').innerText()).includes('2 changes'),
+    'opened again without the database: saved data and waiting changes are still there');
+
+  await page.unroute(noDatabase);
+  await page.evaluate(() => dispatchEvent(new Event('online')));
+  await page.waitForSelector('#syncbar', { state: 'hidden', timeout: 30000 });
+  ok(true, 'when the internet is back, waiting changes are sent by themselves');
+  await page.waitForSelector('tr:has-text("Mama Tunde"):has-text("INV-")');
+  const offlineInv = await page.locator('tr:has-text("Mama Tunde") b.num').first().innerText();
+  ok(/^INV-\d{5}$/.test(offlineInv), 'the offline sale got its invoice number', offlineInv);
+  await page.fill('#salesQ', ref.toLowerCase());
+  ok((await page.locator('tbody tr').count()) === 1 && await page.locator(`tr:has-text("${offlineInv}")`).isVisible(), 'the receipt number finds the sale');
+  await page.click('[data-nav="products"] >> visible=true');
+  await page.waitForTimeout(500);
+  ok((await countOf('Table water 75cl')) === waterBefore - 3 && (await countOf('Coke 50cl')) === cokeBefore + 12, 'the database has the same stock counts');
+
+  // Opened without internet after the login expired; Supabase renews it once the internet is back.
+  await page.route(noDatabase, r => r.abort('internetdisconnected'));
+  await page.evaluate(() => {
+    const k = Object.keys(localStorage).find(x => x.endsWith('-auth-token'));
+    const s = JSON.parse(localStorage.getItem(k)); s.expires_at = Math.floor(Date.now() / 1000) - 60; localStorage.setItem(k, JSON.stringify(s));
+  });
+  await page.reload();
+  await page.waitForSelector('h1:text("My sales")');
+  await page.waitForSelector('#syncbar:has-text("No internet")');
+  ok(await page.locator(`tr:has-text("${offlineInv}")`).first().isVisible(), 'opened without internet after the login expired: still works from what was saved',
+    await page.locator('#main').innerText().catch(() => ''));
+  await page.unroute(noDatabase);
+  await ctx.close();
+
+  console.log('\nA waiting change the database turns down (owner on two devices)');
+  const A = await newPage(), B = await newPage();
+  for (const d of [A, B]) {
+    await login(d.page, 'mummy', 'water2026');
+    await d.page.waitForSelector('h1:text("Today")');
+    await d.page.click('[data-nav="sales"] >> visible=true');
+    await d.page.click(`tr:has-text("${offlineInv}")`);
+  }
+  await A.ctx.setOffline(true);
+  await A.page.click('#iv-pay');
+  await A.page.fill('#pm-a', '1000');
+  await A.page.click('#pm button[type=submit]');
+  await A.page.waitForSelector('.toast:has-text("The payment is saved on this device")');
+  await A.page.waitForSelector('.invoice .tots :text("₦3,800")');
+  ok(true, 'a payment made without internet already shows on the invoice');
+  await B.page.click('#iv-pay');
+  await B.page.click('#pm button[type=submit]');
+  await B.page.waitForSelector('.invoice .tots :text("₦0")');
+  await A.ctx.setOffline(false);
+  await A.page.waitForSelector('#syncbar.bad:has-text("could not be saved")', { timeout: 30000 });
+  ok(true, 'the waiting payment for an invoice already paid on the other device is turned down, shown in red');
+  await A.page.click('.modal-f >> text=Done');
+  await A.page.click('#syncbar >> text=See what happened');
+  ok(await A.page.locator('.modal :text("already fully paid")').isVisible(), 'the list says why');
+  await shot(A.page, '17-not-saved');
+  await A.page.click('[data-drop]');
+  await A.page.waitForSelector('#syncbar', { state: 'hidden' });
+  ok(true, 'removed from the list once dealt with');
+  await B.page.click('.modal-f >> text=Done');
+  await B.page.click('[data-nav="activity"] >> visible=true');
+  ok(await B.page.locator(`.feed :text("${offlineInv} · made offline")`).isVisible(), 'the owner sees the sale was made offline');
+  await A.ctx.close(); await B.ctx.close();
+
   // ---------------- phone ----------------
   console.log('\nPhone views');
   ({ ctx, page } = await newPage({ width: 390, height: 844 }));
