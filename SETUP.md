@@ -164,7 +164,13 @@ Every sale, delivery, price change, payment, login and staff change is written t
 ## Good to know
 
 - **Running low** on the Home screen is worked out from the last 7 days of sales: a product shows up when what's left would last less than a week, or when it's out of stock.
-- **Internet is needed to save a sale.** The stock check happens on the database, so two people can never sell the same last carton.
+- **No internet?** Sales, stock received and payments still work. They are saved on the device and sent by themselves when the internet is back. The bar at the top of the app says how many are waiting.
+  - Until a sale is sent, its receipt shows a receipt number like `F62526E6` instead of an invoice number. You can type it into the search box on **Sales** to find the sale later.
+  - The app has to have been opened once with internet on that device, so it has a copy of the products and prices.
+  - An offline sale is checked against the stock count the device last saw. If another device sold the same goods in the meantime, the sale is still saved, the stock count stops at 0, and the owner gets a note in **Activity** to check the shelf.
+  - If the owner changed a price while a device was offline, a sale made before the change keeps the price on its receipt.
+- **What still needs internet:** logging in, changing prices or products, staff changes and cancelling a sale. The app won't log out while changes are waiting, and after logging out without internet nobody can log in until it's back.
+- **If the bar at the top turns red ("could not be saved"):** something made offline was turned down when it was finally sent, for example a payment for an invoice that had already been paid on another device. Tap **See what happened**, tell the owner, then remove it from the list.
 - **If the app stops loading:** free Supabase projects are paused after about a week with little or no use. Daily use keeps it awake. If it does pause (e.g. after a long holiday), log in to supabase.com, open the project and click **Resume project**. All the data comes back.
 - **Staff member forgot their password:** owner goes to **Staff → New password**.
 - **Owner forgot her password:** in Supabase, open **SQL Editor → New query**, paste this (with her username and a new password), and click **Run**:

@@ -34,6 +34,20 @@ const cleanUser = u => String(u || '').trim().toLowerCase();
 const toEmail = u => `${cleanUser(u)}@${LOGIN_DOMAIN}`;
 const isVoid = s => s.status === 'void';
 const tagClass = code => code === 'OWNER' ? 'owner' : 'staff';
+// The first 8 characters of an id: printed on receipts made without internet, and searchable.
+const shortRef = id => String(id || '').slice(0, 8).toUpperCase();
+
+// Browser storage can be full or switched off; the app keeps working without it.
+function readKey(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+function writeKey(k, v) { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) {} }
+function readJSON(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } }
+function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+// No internet, or a connection so slow that a request gave up (see NET_TIMEOUT).
+const NET_TIMEOUT = 15000;
+const isNetworkError = e => /failed to fetch|networkerror|load failed|network request failed|fetch failed|abort|timed? ?out/i
+  .test(String((e && (e.message || e.name)) || e || ''));
+const timeLimit = () => AbortSignal.timeout(NET_TIMEOUT);
 
 const ICON = {
   home: '<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
@@ -64,7 +78,7 @@ function toast(msg, kind = '') {
 function friendlyError(e) {
   const msg = String((e && (e.message || e.error_description)) || e || '');
   const code = (e && e.code) || '';
-  if (/failed to fetch|networkerror|load failed|network request failed|fetch failed/i.test(msg)) return 'No internet connection. Check the network and try again.';
+  if (isNetworkError(e)) return 'No internet connection. Check the network and try again.';
   if (code === 'PGRST202' || /could not find the function/i.test(msg)) return 'The database needs updating. In Supabase, open SQL Editor and run the latest supabase-setup.sql (SETUP.md, step 2), then reload this page.';
   if (/invalid api key|no api key/i.test(msg)) return 'The Supabase key in config.js is not right. Copy the Publishable key again (SETUP.md, step 4).';
   if (code === 'invalid_credentials' || /invalid login credentials/i.test(msg)) return 'Wrong username or password.';
@@ -94,9 +108,17 @@ const sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, {
 });
 
 async function rpc(fn, args = {}) {
-  const { data, error } = await sb.rpc(fn, args);
-  if (error) throw error;
+  const { data, error, status } = await sb.rpc(fn, args).abortSignal(timeLimit());
+  if (error) { error.status = status; throw error; }
   return data;
+}
+
+// Worth trying again later rather than giving up: no internet, the database briefly down,
+// or the login not renewed yet (Supabase sends such requests as "not logged in").
+const canRetry = e => isNetworkError(e) || (e && e.status >= 500)
+  || /jwt|permission denied for function|could not find the function/i.test(String((e && e.message) || ''));
+async function loggedIn() {
+  try { const { data } = await sb.auth.getSession(); return !!data.session; } catch (e) { return false; }
 }
 
 /* ---------------- state ---------------- */
@@ -104,7 +126,9 @@ const S = {
   user: null, profile: null, gen: 0, channel: null, live: false, liveLost: false, timers: {},
   justLoggedIn: false, loginMsg: '',
   view: 'home',
+  // What the screens show: the database's rows (base) plus what's still waiting to be sent (outbox).
   products: [], customers: [], users: [], activity: [], sales: [], debts: [], payments: [], stockins: [],
+  base: {}, outbox: [], failed: [], offline: false, savedAt: null,
   loaded: {},
   ui: { salesPeriod: 'today', salesQ: '', prodQ: '', actWho: '', actKind: '', stockQ: '' },
 };
@@ -119,14 +143,14 @@ function logEvent(kind, message) {
 async function fetchAll(make) {
   const size = 1000; let from = 0, out = [];
   for (;;) {
-    const { data, error } = await make().range(from, from + size - 1);
+    const { data, error } = await make().range(from, from + size - 1).abortSignal(timeLimit());
     if (error) throw error;
     out = out.concat(data || []);
     if (!data || data.length < size) return out;
     from += size;
   }
 }
-async function fetchSome(q) { const { data, error } = await q; if (error) throw error; return data || []; }
+async function fetchSome(q) { const { data, error } = await q.abortSignal(timeLimit()); if (error) throw error; return data || []; }
 
 const LOADERS = {
   products: () => fetchAll(() => sb.from('products').select('*').eq('archived', false).order('name')),
@@ -147,13 +171,19 @@ async function load(key) {
   if (!S.user || !LOADERS[key]) return;
   const gen = S.gen;
   try {
+    if (!(await loggedIn())) throw new Error('jwt not renewed yet');
     const rows = await LOADERS[key]();
     if (gen !== S.gen) return;
-    S[key] = rows; S.loaded[key] = true;
-    refresh();
+    S.base[key] = rows; S.loaded[key] = true; S.savedAt = new Date().toISOString();
+    saveCacheSoon();
+    setOffline(false);
+    showChanges();
   } catch (e) {
+    if (gen !== S.gen) return;
+    // The screens keep what was saved on this device; the bar at the top says so.
+    if (canRetry(e)) return setOffline(true);
     console.error(key, e);
-    if (gen === S.gen) toast(`Could not load ${LABEL[key] || key}. ${friendlyError(e)}`, 'bad');
+    toast(`Could not load ${LABEL[key] || key}. ${friendlyError(e)}`, 'bad');
   }
 }
 function reloadSoon(...keys) {
@@ -163,10 +193,178 @@ async function reloadAll() {
   if (!S.user) return;
   if (!isOwner()) {
     // make sure this login is still switched on
-    const { data } = await sb.from('profiles').select('active').eq('id', S.user.id).maybeSingle();
+    const { data } = await sb.from('profiles').select('active').eq('id', S.user.id).maybeSingle().abortSignal(timeLimit());
     if (data && data.active === false) return forceOut('This account has been switched off. Ask the owner.');
   }
   reloadSoon(...keysForRole());
+}
+
+/* ---------------- working without internet ----------------
+   Sales, stock received and payments are first written to this device (the outbox),
+   then sent in order. Without internet they wait there and go out once it's back.
+   Each one carries an id picked here, so if an answer gets lost and it is sent again,
+   the database still saves it once. The last data loaded is kept on this device too,
+   so the screens open without internet. */
+const outboxKey = () => 'outbox:' + S.user.id;
+const cacheKey = id => 'cache:' + id;
+const RPC_FOR = { sale: 'create_sale', stock: 'receive_stock', payment: 'record_payment' };
+
+function openOutbox() {
+  const o = readJSON(outboxKey()) || {};
+  S.outbox = o.waiting || []; S.failed = o.failed || [];
+}
+function storeOutbox() { writeJSON(outboxKey(), { waiting: S.outbox, failed: S.failed }); }
+// Another window of the app on this device changed the outbox. Nothing is dropped:
+// sending something twice is harmless, losing it is not.
+window.addEventListener('storage', e => {
+  if (!S.user || e.key !== outboxKey()) return;
+  const o = readJSON(e.key) || {};
+  const add = (mine, theirs) => mine.concat((theirs || []).filter(t => !mine.some(m => m.id === t.id)));
+  S.outbox = add(S.outbox, o.waiting); S.failed = add(S.failed, o.failed);
+  showChanges(); syncNow();
+});
+
+function saveCacheSoon() {
+  const uid = S.user.id;
+  clearTimeout(S.timers.cache);
+  S.timers.cache = setTimeout(() => writeJSON(cacheKey(uid), { profile: S.profile, base: S.base, savedAt: S.savedAt }), 500);
+}
+
+// Saves a sale, stock received or a payment. Resolves with { data } once the database has it,
+// or { waiting: true } when it's kept on this device for later. Throws when the database
+// refused it (e.g. not enough stock), so the form can say why.
+async function save(kind, args, view) {
+  const id = crypto.randomUUID(), madeAt = new Date().toISOString();
+  const tryNow = !S.offline && navigator.onLine !== false;
+  // offline: sent later as "made offline", so the database accepts what already happened (see create_sale)
+  const item = { id, kind, args, madeAt, offline: !tryNow, view: { ...view, id, created_at: madeAt, pending: true } };
+  S.outbox.push(item); storeOutbox(); showChanges();
+  if (tryNow) {
+    await syncNow();
+    // A send that was just finishing when this was added doesn't pick it up; start another.
+    if (S.outbox.includes(item) && !S.offline) await syncNow();
+  } else syncNow();
+  const refused = S.failed.find(f => f.id === id);
+  if (refused) {
+    S.failed = S.failed.filter(f => f !== refused); storeOutbox(); showChanges();
+    throw new Error(refused.error);
+  }
+  if (!S.outbox.includes(item)) return { data: item.result, id };
+  item.offline = true; storeOutbox(); showChanges();
+  return { waiting: true, id };
+}
+
+let syncing = null;
+function syncNow() {
+  if (!syncing) syncing = sendWaiting().finally(() => { syncing = null; });
+  return syncing;
+}
+async function sendWaiting() {
+  const gen = S.gen;
+  let answered = 0; // saved or refused: either way the database has moved on, so reload after
+  while (S.user && S.outbox.length && gen === S.gen) {
+    const item = S.outbox[0];
+    try {
+      if (!(await loggedIn())) throw new Error('jwt not renewed yet');
+      item.result = await rpc(RPC_FOR[item.kind], { ...item.args, p_client_id: item.id, ...(item.offline ? { p_made_at: item.madeAt } : {}) });
+    } catch (e) {
+      if (gen !== S.gen) return;
+      if (canRetry(e)) {
+        S.dbOutdated = /could not find the function/i.test(String(e.message || ''));
+        item.offline = true; storeOutbox(); setOffline(!S.dbOutdated);
+        break;
+      }
+      S.failed.push({ ...item, error: friendlyError(e) });
+    }
+    answered++;
+    S.outbox = S.outbox.filter(i => i !== item); storeOutbox();
+    S.dbOutdated = false;
+    setOffline(false);
+    showChanges();
+  }
+  if (answered) reloadSoon(...keysForRole());
+}
+
+function setOffline(v) {
+  if (S.offline === v) return;
+  S.offline = v;
+  updateSyncBar();
+  if (!v && S.outbox.length) syncNow();
+}
+window.addEventListener('online', () => { if (S.user) { reloadAll(); syncNow(); } });
+window.addEventListener('offline', () => { if (S.user) setOffline(true); });
+// Keep checking whether the internet is back.
+setInterval(() => {
+  if (!S.user) return;
+  if (S.offline) reloadAll();
+  if (S.outbox.length) syncNow();
+}, 20000);
+
+const waiting = kind => S.outbox.filter(i => i.kind === kind).map(i => i.view);
+function withWaitingPayments(s) {
+  const extra = sum(waiting('payment').filter(p => p.sale_id === s.id), p => p.amount);
+  return extra ? { ...s, amount_paid: n0(s.amount_paid) + extra, balance: Math.max(0, n0(s.balance) - extra) } : s;
+}
+// The screens show the database's rows plus what's still waiting, so a sale made offline is
+// already in the lists and its goods are already out of the stock count.
+function recompute() {
+  const b = k => S.base[k] || [];
+  // Sent already but still listed here (the answer got lost): the database's row wins.
+  const savedSales = new Set(b('sales').map(r => r.id)), savedStock = new Set(b('stockins').map(r => r.id));
+  const sales = waiting('sale').filter(s => !savedSales.has(s.id)).reverse();
+  const stock = waiting('stock').filter(r => !savedStock.has(r.id)).reverse();
+  const change = new Map();
+  const add = (id, n) => change.set(id, (change.get(id) || 0) + n);
+  sales.forEach(s => s.items.forEach(l => add(l.product_id, -l.qty)));
+  stock.forEach(r => add(r.product_id, r.qty));
+  S.products = b('products').map(p => change.has(p.id) ? { ...p, qty: Math.max(0, n0(p.qty) + change.get(p.id)) } : p);
+  S.sales = [...sales, ...b('sales')].map(withWaitingPayments);
+  S.debts = [...sales, ...b('debts')].map(withWaitingPayments).filter(s => n0(s.balance) > 0);
+  S.stockins = [...stock, ...b('stockins')];
+  const firstPays = sales.filter(s => n0(s.amount_paid) > 0)
+    .map(s => ({ id: s.id, sale_id: s.id, amount: s.amount_paid, method: s.method === 'credit' ? 'cash' : s.method, created_at: s.created_at, pending: true }));
+  S.payments = [...waiting('payment').reverse(), ...firstPays, ...b('payments')];
+  S.customers = b('customers'); S.users = b('users'); S.activity = b('activity');
+}
+function showChanges() { recompute(); refresh(); updateSyncBar(); }
+
+function updateSyncBar() {
+  const bar = $('#syncbar'); if (!bar) return;
+  const n = S.outbox.filter(i => i.offline).length, f = S.failed.length;
+  let html = '';
+  if (f) html = `<span>${plural(f, 'change')} could not be saved.</span><button class="btn" data-do="failed">See what happened</button>`;
+  else if (S.dbOutdated) html = `<span>${plural(n, 'change')} waiting. The database needs updating first: in Supabase, run the latest supabase-setup.sql (SETUP.md, step 2).</span>`;
+  else if (n && S.offline) html = `<span>No internet. ${plural(n, 'change')} saved on this device will be sent when the internet is back.</span>`;
+  else if (n) html = `<span>Sending ${plural(n, 'change')}…</span>`;
+  else if (S.offline) html = `<span>No internet. Showing what was saved ${S.savedAt ? 'at ' + esc(fmtDT(S.savedAt)) : 'earlier'}.</span>`;
+  bar.hidden = !html;
+  bar.classList.toggle('bad', !!f);
+  bar.innerHTML = html;
+  bind(bar);
+}
+
+function failedModal() {
+  if (!S.failed.length) return closeModal();
+  const what = i => i.kind === 'sale' ? `Sale to ${i.view.customer_name || 'a walk-in customer'} for ${money(i.view.total)} (receipt ${shortRef(i.id)})`
+    : i.kind === 'stock' ? `${plural(i.view.qty, i.view.unit)} of ${i.view.product_name} received`
+    : `${money(i.view.amount)} paid on ${i.view.invoice_no || 'receipt ' + shortRef(i.view.sale_id)}`;
+  const m = openModal(`${mHead('Not saved')}
+  <div class="modal-b">
+    <p style="margin:0">These were made without internet, but the database did not take them when they were sent, so they are <b>not in the records</b>. Tell the owner. Then try again, or remove them from this list.</p>
+    <ul class="lowlist">${S.failed.map(i => `<li><div><b>${esc(what(i))}</b><div class="small muted">${esc(fmtDT(i.madeAt))} · ${esc(i.error)}</div></div>
+      <div class="row" style="gap:8px;flex-wrap:nowrap"><button class="btn" data-again="${i.id}">Try again</button><button class="btn danger" data-drop="${i.id}">Remove</button></div></li>`).join('')}</ul>
+  </div>
+  <div class="modal-f"><button class="btn primary" data-close>Done</button></div>`);
+  $$('[data-again]', m).forEach(b => b.addEventListener('click', () => {
+    const i = S.failed.find(x => x.id === b.dataset.again);
+    S.failed = S.failed.filter(x => x !== i);
+    S.outbox.push({ ...i, error: undefined, offline: true }); storeOutbox();
+    showChanges(); syncNow(); failedModal();
+  }));
+  $$('[data-drop]', m).forEach(b => b.addEventListener('click', () => {
+    S.failed = S.failed.filter(x => x.id !== b.dataset.drop); storeOutbox();
+    showChanges(); failedModal();
+  }));
 }
 
 function subscribe() {
@@ -210,6 +408,11 @@ sb.auth.onAuthStateChange((event, session) => {
 async function handleAuth(event, session) {
   if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') return;
   if (!session) {
+    // Opened without internet after the login expired. Supabase keeps the login saved and
+    // renews it once the internet is back, so carry on with what's saved on this device.
+    const saved = event === 'INITIAL_SESSION' && readJSON(sb.auth.storageKey);
+    const cached = saved && saved.user && readJSON(cacheKey(saved.user.id));
+    if (cached) { teardown(); return start(saved.user, cached.profile, cached); }
     teardown(); S.user = null; S.profile = null;
     const msg = S.loginMsg; S.loginMsg = '';
     return showLogin(msg);
@@ -220,21 +423,42 @@ async function handleAuth(event, session) {
 }
 
 async function enter(user) {
-  const { data: prof, error } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
-  if (error && /failed to fetch|network/i.test(error.message || '')) {
+  const gen = S.gen;
+  const cached = readJSON(cacheKey(user.id));
+  // With a copy saved on this device, open straight away (a bad connection can take a while
+  // to fail) and check the account in the background.
+  if (cached) start(user, cached.profile, cached);
+  const { data: prof, error } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle().abortSignal(timeLimit());
+  // Supabase can report the same login twice at start-up; the newer one carries on.
+  if (gen !== S.gen) return;
+  if (error && canRetry(error)) {
+    if (cached) return;
     app.innerHTML = `<div class="auth"><div class="auth-card"><h2>No internet</h2><p>Could not reach the database. Check the connection.</p><button class="btn primary big block" id="retry">Try again</button></div></div>`;
     $('#retry').addEventListener('click', () => enter(user));
     return;
   }
   if (!prof) return forceOut('This login has no account in the warehouse. Ask the owner.');
   if (!prof.active) return forceOut('This account has been switched off. Ask the owner.');
+  if (S.justLoggedIn) { S.justLoggedIn = false; logEvent('login', 'Logged in'); }
+  if (!cached) return start(user, prof, null);
+  if (JSON.stringify(prof) !== JSON.stringify(S.profile)) { S.profile = prof; saveCacheSoon(); renderShell(); }
+}
+
+function start(user, prof, cached) {
   S.user = user;
   S.profile = prof;
   S.view = isOwner() ? 'home' : 'sales';
-  if (S.justLoggedIn) { S.justLoggedIn = false; logEvent('login', 'Logged in'); }
+  openOutbox();
+  // Show what was saved on this device straight away; fresh rows replace it as they arrive.
+  if (cached && cached.base) {
+    S.base = cached.base; S.savedAt = cached.savedAt;
+    Object.keys(cached.base).forEach(k => { S.loaded[k] = true; });
+  }
+  recompute();
   renderShell();
   subscribe();
   keysForRole().forEach(k => load(k));
+  syncNow();
 }
 
 function teardown() {
@@ -243,6 +467,7 @@ function teardown() {
   Object.values(S.timers).forEach(clearTimeout); S.timers = {};
   S.loaded = {}; S.live = false; S.everLive = false; S.liveLost = false;
   ['products', 'customers', 'users', 'activity', 'sales', 'debts', 'payments', 'stockins'].forEach(k => S[k] = []);
+  S.base = {}; S.outbox = []; S.failed = []; S.offline = false; S.dbOutdated = false; S.savedAt = null;
   closeModal();
 }
 
@@ -252,8 +477,21 @@ function forceOut(msg) {
   return sb.auth.signOut({ scope: 'local' }).catch(() => { teardown(); showLogin(msg); });
 }
 
-async function logout() {
-  await logEvent('logout', 'Logged out');
+function logout() {
+  // What's waiting is sent with this login, so it has to stay logged in until then.
+  if (S.outbox.length) return toast(`${plural(S.outbox.length, 'change')} not sent yet. Stay logged in until the internet is back and they have been sent.`, 'bad');
+  if (S.failed.length) return toast('Some changes were not saved. Tap “See what happened” at the top first.', 'bad');
+  if (!S.offline) return signOut();
+  const m = openModal(`${mHead('Log out?')}
+  <div class="modal-b"><p style="margin:0">There is no internet. After logging out, nobody can log in on this device until the internet is back.</p></div>
+  <div class="modal-f"><button class="btn" data-close>Stay logged in</button><button class="btn primary" id="lo-yes">Log out</button></div>`);
+  $('#lo-yes', m).addEventListener('click', () => { closeModal(); signOut(); });
+}
+async function signOut() {
+  const uid = S.user.id;
+  if (!S.offline) await logEvent('logout', 'Logged out');
+  clearTimeout(S.timers.cache);
+  writeKey(cacheKey(uid), '');   // this device may be shared; don't leave the records on it
   await sb.auth.signOut({ scope: 'local' });
 }
 
@@ -353,7 +591,7 @@ function renderShell() {
       <div class="brand"><img src="icon.svg" alt=""><span>${esc(CFG.businessName || 'Warehouse')}</span></div>
       <span class="tag" style="color:#fff;border-color:rgba(255,255,255,.5)">${esc(p.staff_code)}</span>
     </header>
-    <main class="main"><div class="main-in" id="main"></div></main>
+    <main class="main"><div id="syncbar" class="syncbar" role="status" hidden></div><div class="main-in" id="main"></div></main>
     <nav class="tabbar">${tabItems().map(([v, l, i]) => `<button data-nav="${v}">${icon(i)}<span>${l}</span></button>`).join('')}</nav>
   </div>`;
   $$('[data-nav]').forEach(b => b.addEventListener('click', () => go(b.dataset.nav)));
@@ -361,6 +599,7 @@ function renderShell() {
   $$('[data-act="pw"]').forEach(b => b.addEventListener('click', changePasswordModal));
   $$('[data-act="printer"]').forEach(b => b.addEventListener('click', () => printerModal()));
   go(S.view);
+  updateSyncBar();
 }
 
 function go(view) {
@@ -411,6 +650,7 @@ const actions = {
   pw: () => changePasswordModal(),
   printer: () => printerModal(),
   logout: () => logout(),
+  failed: () => failedModal(),
 };
 
 /* ---------------- numbers ---------------- */
@@ -526,7 +766,7 @@ function viewSales() {
   const p = S.ui.salesPeriod;
   const q = S.ui.salesQ.trim().toLowerCase();
   let rows = p === 'owing' ? S.debts : salesSince(periodStart(p));
-  if (q) rows = rows.filter(s => [s.invoice_no, s.customer_name, s.customer_phone, s.sold_by_name, s.sold_by_code, ...(s.items || []).map(i => i.name)].join(' ').toLowerCase().includes(q));
+  if (q) rows = rows.filter(s => [s.invoice_no, shortRef(s.id), s.customer_name, s.customer_phone, s.sold_by_name, s.sold_by_code, ...(s.items || []).map(i => i.name)].join(' ').toLowerCase().includes(q));
   const valid = okSales(rows);
   return `
   ${pageHead(isOwner() ? 'Sales' : 'My sales', isOwner() ? 'Every sale by everyone' : 'Sales you recorded', btnNewSale)}
@@ -543,7 +783,7 @@ function viewSales() {
   <div class="panel">
     ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Invoice</th><th>Customer</th><th class="hide-sm">Items</th>${isOwner() ? '<th class="hide-sm">By</th>' : ''}<th class="r">Total</th><th class="hide-sm">Status</th></tr></thead><tbody>
     ${rows.map(s => `<tr class="click ${isVoid(s) ? 'void' : ''}" data-do="openSale" data-id="${s.id}">
-      <td style="white-space:nowrap"><b class="num">${esc(s.invoice_no)}</b><div class="small muted">${esc(fmtDT(s.created_at))}</div></td>
+      <td style="white-space:nowrap"><b class="num">${esc(s.invoice_no || shortRef(s.id))}</b><div class="small muted">${esc(fmtDT(s.created_at))}</div></td>
       <td>${esc(s.customer_name || 'Walk-in')}${isOwner() ? `<div class="show-sm"><span class="tag ${tagClass(s.sold_by_code)}">${esc(s.sold_by_code)}</span></div>` : ''}</td>
       <td class="small hide-sm">${(s.items || []).map(i => `${qty(i.qty)} × ${esc(i.name)}`).join(', ')}</td>
       ${isOwner() ? `<td class="hide-sm"><span class="tag ${tagClass(s.sold_by_code)}">${esc(s.sold_by_code)}</span></td>` : ''}
@@ -552,7 +792,9 @@ function viewSales() {
     </tbody></table></div>` : `<div class="empty">${p === 'owing' ? 'Nobody owes money. ' : 'No sales in this period. '}${q ? 'Try a different search.' : ''}</div>`}
   </div>`;
 }
+const notSentPill = '<span class="pill info">Not sent yet</span>';
 function statusPill(s) {
+  if (s.pending) return notSentPill;
   if (isVoid(s)) return '<span class="pill muted">Cancelled</span>';
   if (n0(s.balance) <= 0) return '<span class="pill good">Paid</span>';
   return `<span class="pill ${n0(s.amount_paid) > 0 ? 'warn' : 'bad'}">Owes ${money(s.balance)}</span>`;
@@ -589,7 +831,7 @@ function viewStock() {
   ${S.stockins.length > 6 ? `<div class="filters"><input type="search" id="stockQ" data-set="stockQ" placeholder="Search product, supplier…" value="${esc(S.ui.stockQ)}"></div>` : ''}
   <div class="panel">
     ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Product</th><th class="r">Quantity</th><th class="hide-sm">Supplier</th>${isOwner() ? '<th class="r hide-sm">Cost</th><th>By</th>' : ''}<th class="hide-sm">Note</th></tr></thead><tbody>
-    ${rows.map(r => `<tr><td><b>${esc(r.product_name)}</b><div class="small muted">${esc(fmtDT(r.created_at))}${r.supplier ? `<span class="show-sm"> · ${esc(r.supplier)}</span>` : ''}</div></td>
+    ${rows.map(r => `<tr><td><b>${esc(r.product_name)}</b>${r.pending ? ' ' + notSentPill : ''}<div class="small muted">${esc(fmtDT(r.created_at))}${r.supplier ? `<span class="show-sm"> · ${esc(r.supplier)}</span>` : ''}</div></td>
       <td class="r num" style="white-space:nowrap">${plural(r.qty, r.unit)}</td><td class="hide-sm">${esc(r.supplier || '—')}</td>
       ${isOwner() ? `<td class="r num hide-sm">${r.cost_per_unit != null ? money(n0(r.cost_per_unit) * n0(r.qty)) : '—'}</td><td><span class="tag ${tagClass(r.received_by_code)}">${esc(r.received_by_code)}</span></td>` : ''}
       <td class="small muted hide-sm">${esc(r.note || '')}</td></tr>`).join('')}
@@ -760,11 +1002,16 @@ function stockModal(presetId) {
     const p = productById(sel.value), q = Math.floor(n0($('#sf-q', m).value));
     if (!p || q <= 0) return $('#sf-err', m).textContent = 'Enter how many came in.';
     const costRaw = $('#sf-c', m).value.trim();
+    const args = { p_product: p.id, p_qty: q, p_cost: costRaw === '' ? null : n0(costRaw), p_supplier: $('#sf-s', m).value.trim() || null, p_note: $('#sf-n', m).value.trim() || null };
+    const view = { product_id: p.id, product_name: p.name, unit: p.unit, qty: q, cost_per_unit: args.p_cost, supplier: args.p_supplier, note: args.p_note,
+      received_by: S.user.id, received_by_name: S.profile.name, received_by_code: S.profile.staff_code };
     busy(e.submitter, true);
     try {
-      await rpc('receive_stock', { p_product: p.id, p_qty: q, p_cost: costRaw === '' ? null : n0(costRaw), p_supplier: $('#sf-s', m).value || null, p_note: $('#sf-n', m).value || null });
+      const res = await save('stock', args, view);
+      closeModal();
+      if (res.waiting) return toast(`No internet. ${plural(q, p.unit)} of ${p.name} saved on this device. It will be sent when the internet is back.`);
       reloadSoon('products', 'stockins', 'activity');
-      closeModal(); toast(`Added ${plural(q, p.unit)} of ${p.name}`, 'good');
+      toast(`Added ${plural(q, p.unit)} of ${p.name}`, 'good');
     } catch (ex) { $('#sf-err', m).textContent = friendlyError(ex); busy(e.submitter, false); }
   });
 }
@@ -873,17 +1120,33 @@ function saleModal() {
     const paid = Math.min(Math.max(0, n0($('#nf-paid', m).value)), total);
     const name = $('#nf-c', m).value.trim();
     if (paid < total && !name) return err.textContent = 'This customer still owes money. Enter their name so you can follow up.';
+    // Checked here too, because a sale made without internet can't be checked by the database first.
+    const want = new Map();
+    merged.forEach(l => want.set(l.p.id, (want.get(l.p.id) || 0) + l.qty));
+    const short = merged.find(l => want.get(l.p.id) > n0(l.p.qty));
+    if (short) return err.textContent = `Only ${plural(short.p.qty, short.p.unit)} of ${short.p.name} left in stock.`;
+
+    const phone = $('#nf-ph', m).value.trim() || null, note = $('#nf-note', m).value.trim() || null, method = $('#nf-m', m).value;
+    // The price goes with every item: the database uses it for the owner, and for a sale made
+    // offline just before a price change (see create_sale). Otherwise staff get the list price.
+    const args = { p_items: merged.map(l => ({ product_id: l.p.id, qty: l.qty, price: l.price })), p_method: method, p_amount_paid: paid,
+      p_customer_name: name || null, p_customer_phone: phone, p_note: note };
+    const view = {
+      invoice_no: null, customer_name: name || null, customer_phone: phone, method, note, status: 'ok',
+      items: merged.map(l => ({ product_id: l.p.id, name: l.p.name, unit: l.p.unit, qty: l.qty, price: l.price, list_price: n0(l.p.price), total: l.qty * l.price })),
+      total, amount_paid: paid, balance: total - paid, sold_by: S.user.id, sold_by_name: S.profile.name, sold_by_code: S.profile.staff_code,
+    };
 
     const btn = $('#nf-save', m); busy(btn, true, 'Saving…');
     try {
-      const res = await rpc('create_sale', {
-        p_items: merged.map(l => owner ? { product_id: l.p.id, qty: l.qty, price: l.price } : { product_id: l.p.id, qty: l.qty }),
-        p_method: $('#nf-m', m).value, p_amount_paid: paid,
-        p_customer_name: name || null, p_customer_phone: $('#nf-ph', m).value.trim() || null, p_note: $('#nf-note', m).value.trim() || null,
-      });
+      const res = await save('sale', args, view);
+      if (res.waiting) {
+        toast('No internet. The sale is saved on this device and will be sent when the internet is back.');
+        return invoiceModal(res.id);
+      }
       reloadSoon('products', 'sales', 'debts', 'payments', 'activity', 'customers');
-      toast(`Sale saved · ${res.invoice_no}`, 'good');
-      invoiceModal(res.id);
+      toast(`Sale saved · ${res.data.invoice_no}`, 'good');
+      invoiceModal(res.data.id);
     } catch (ex) { err.textContent = friendlyError(ex); busy(btn, false, 'Save sale'); }
   });
 }
@@ -897,7 +1160,7 @@ function waPhone(p) {
 function invoiceText(s) {
   const lines = [
     `*${CFG.businessName || 'Warehouse'}*`,
-    `Invoice ${s.invoice_no} · ${fmtD(s.created_at)}`,
+    `${s.invoice_no ? 'Invoice ' + s.invoice_no : 'Receipt ' + shortRef(s.id)} · ${fmtD(s.created_at)}`,
     `Customer: ${s.customer_name || 'Walk-in customer'}`, '',
     ...(s.items || []).map(i => `${plural(i.qty, i.unit)} ${i.name} × ${money(i.price)} = ${money(i.total)}`), '',
     `Total: ${money(s.total)}`, `Paid: ${money(s.amount_paid)}`,
@@ -909,19 +1172,33 @@ function invoiceText(s) {
 }
 
 async function invoiceModal(id) {
-  const { data: s, error } = await sb.from('sales').select('*').eq('id', id).maybeSingle();
-  if (error || !s) return toast(error ? friendlyError(error) : 'Could not open that sale.', 'bad');
-  let pays = [];
-  if (isOwner()) { const r = await sb.from('payments').select('*').eq('sale_id', id).order('created_at'); pays = r.data || []; }
+  // What's on this device first; a fresh copy from the database when there's internet.
+  let s = S.sales.find(x => x.id === id) || S.debts.find(x => x.id === id);
+  let pays = S.payments.filter(p => p.sale_id === id);
+  if (!s || !s.pending) {
+    const r = await sb.from('sales').select('*').eq('id', id).maybeSingle().abortSignal(timeLimit());
+    if (r.error && !canRetry(r.error)) return toast(friendlyError(r.error), 'bad');
+    if (r.data) {
+      s = withWaitingPayments(r.data);
+      if (isOwner()) {
+        const p = await sb.from('payments').select('*').eq('sale_id', id).order('created_at').abortSignal(timeLimit());
+        if (!p.error) pays = [...(p.data || []), ...waiting('payment').filter(x => x.sale_id === id)];
+      }
+    }
+  }
+  if (!s) return toast('Could not open that sale. No internet connection.', 'bad');
+  if (!isOwner()) pays = [];
+  const ref = s.invoice_no || 'Receipt ' + shortRef(s.id);
   const wa = `https://wa.me/${waPhone(s.customer_phone)}?text=${encodeURIComponent(invoiceText(s))}`;
   const canChange = isOwner() && !isVoid(s);
-  const m = openModal(`${mHead('Invoice ' + esc(s.invoice_no))}
+  const m = openModal(`${mHead((s.invoice_no ? 'Invoice ' : '') + esc(ref))}
   <div class="modal-b">
     ${isVoid(s) ? `<div class="pill bad" style="justify-self:start;font-size:14px">Cancelled: ${esc(s.void_reason || '')}</div>` : ''}
+    ${s.pending ? '<p class="muted" style="margin:0">Saved on this device. It will be sent when the internet is back, and then gets its invoice number.</p>' : ''}
     <div class="invoice">
       <div class="ih">
         <div><div class="biz">${esc(CFG.businessName || 'Warehouse')}</div><div class="small">${esc(CFG.businessAddress || '')}${CFG.businessPhone ? '<br>' + esc(CFG.businessPhone) : ''}</div></div>
-        <div class="meta"><div class="no">${esc(s.invoice_no)}</div><div>${esc(fmtDT(s.created_at))}</div><div>Served by ${esc(s.sold_by_name)} (${esc(s.sold_by_code)})</div></div>
+        <div class="meta"><div class="no">${esc(ref)}</div><div>${esc(fmtDT(s.created_at))}</div><div>Served by ${esc(s.sold_by_name)} (${esc(s.sold_by_code)})</div></div>
       </div>
       <div><div class="small" style="color:#555;text-transform:uppercase;letter-spacing:.06em;font-weight:700">Bill to</div><div style="font-weight:700">${esc(s.customer_name || 'Walk-in customer')}</div>${s.customer_phone ? `<div>${esc(s.customer_phone)}</div>` : ''}</div>
       <div class="tbl-wrap"><table><thead><tr><th>Item</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Amount</th></tr></thead><tbody>
@@ -938,7 +1215,7 @@ async function invoiceModal(id) {
     </div>
   </div>
   <div class="modal-f">
-    ${canChange ? `<button class="btn danger" id="iv-void" style="margin-right:auto">Cancel sale</button>` : ''}
+    ${canChange && !s.pending ? `<button class="btn danger" id="iv-void" style="margin-right:auto">Cancel sale</button>` : ''}
     ${canChange && n0(s.balance) > 0 ? `<button class="btn" id="iv-pay">${icon('cash')}Record payment</button>` : ''}
     <a class="btn" href="${esc(wa)}" target="_blank" rel="noopener">${icon('chat')}WhatsApp</a>
     <button class="btn" id="iv-print">${icon('print')}Print receipt</button>
@@ -961,8 +1238,6 @@ const PAPER_DOTS = 576; // printable width of 80mm paper at 203 dpi
 const USB_PRINTER_CLASS = 7;
 const hasUsb = () => !!navigator.usb;
 const canPrint = () => !!desktop || hasUsb();
-function readKey(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
-function writeKey(k, v) { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) {} }
 const printerName = () => readKey(PRINTER_NAME_KEY);
 function usesPrinter() { return desktop ? !!printerName() : hasUsb() && readKey(PRINTER_KEY) === '1'; }
 
@@ -1028,7 +1303,7 @@ function saleReceipt(s, pays) {
     CFG.businessAddress && { text: CFG.businessAddress, align: 'center' },
     CFG.businessPhone && { text: CFG.businessPhone, align: 'center' },
     'rule',
-    { text: s.invoice_no, size: 30, bold: true },
+    { text: s.invoice_no || 'Receipt ' + shortRef(s.id), size: 30, bold: true },
     when && { text: when.toLocaleString('en-NG', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) },
     { text: `Served by ${s.sold_by_name} (${s.sold_by_code})` },
     { text: `Customer: ${s.customer_name || 'Walk-in customer'}` },
@@ -1244,11 +1519,14 @@ function paymentModal(s) {
   <div class="modal-f"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary big" type="submit">Save payment</button></div></form>`);
   $('#pm', m).addEventListener('submit', async e => {
     e.preventDefault();
+    const amount = Math.min(n0($('#pm-a', m).value), n0(s.balance)), method = $('#pm-m', m).value;
+    if (amount <= 0) return $('#pm-err', m).textContent = 'Enter the amount received.';
+    const view = { sale_id: s.id, invoice_no: s.invoice_no, amount, method, received_by: S.user.id, received_by_name: S.profile.name };
     busy(e.submitter, true);
     try {
-      await rpc('record_payment', { p_sale: s.id, p_amount: n0($('#pm-a', m).value), p_method: $('#pm-m', m).value });
-      reloadSoon('sales', 'debts', 'payments', 'activity');
-      toast('Payment saved', 'good');
+      const res = await save('payment', { p_sale: s.id, p_amount: amount, p_method: method }, view);
+      if (res.waiting) toast('No internet. The payment is saved on this device and will be sent when the internet is back.');
+      else { reloadSoon('sales', 'debts', 'payments', 'activity'); toast('Payment saved', 'good'); }
       invoiceModal(s.id);
     } catch (ex) { $('#pm-err', m).textContent = friendlyError(ex); busy(e.submitter, false); }
   });
