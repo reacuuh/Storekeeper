@@ -15,7 +15,21 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const n0 = v => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
 const money = v => (n0(v) < 0 ? '-' : '') + CUR + Math.abs(n0(v)).toLocaleString('en-NG', { maximumFractionDigits: 2 });
-const qty = v => n0(v).toLocaleString('en-NG');
+// Quantities are whole numbers or quarters, shown as 12, ½, 1¼, 2¾.
+const QUARTERS = ['', '¼', '½', '¾'];
+const qty = v => {
+  const n = n0(v), whole = Math.trunc(n), q = Math.round((n - whole) * 4);
+  return (whole || !q ? whole.toLocaleString('en-NG') : '') + (QUARTERS[q] || '');
+};
+// What someone typed: "3", "1,200", "1/2", "1 1/2", "1½" or "1.5". NaN unless it's a whole number or quarters.
+function parseQty(text) {
+  const t = String(text ?? '').replace(/,/g, '').trim().replace(/[¼½¾]/g, c => ' ' + { '¼': '1/4', '½': '1/2', '¾': '3/4' }[c]).trim();
+  const f = t.match(/^(?:(\d+)\s+)?(\d+)\s*\/\s*(\d+)$/);
+  const n = f ? Number(f[1] || 0) + Number(f[2]) / Number(f[3]) : /^(\d+\.?\d*|\.\d+)$/.test(t) ? Number(t) : NaN;
+  return Number.isFinite(n) && Number.isInteger(n * 4) ? n : NaN;
+}
+const QTY_HELP = 'Quantities can be whole numbers or quarters, like 2, 1/2 or 1¼.';
+const lineTotal = (q, price) => Math.round(q * price * 100) / 100; // to the kobo, as the database does
 const toDate = v => { if (!v) return null; if (v instanceof Date) return v; const d = new Date(v); return isNaN(d) ? null : d; };
 const fmtDT = v => { const d = toDate(v); return d ? d.toLocaleString('en-NG', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : ''; };
 const fmtD = v => { const d = toDate(v); return d ? d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' }) : ''; };
@@ -29,7 +43,8 @@ const ago = v => {
 };
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 const daysAgo = n => { const d = startOfDay(); d.setDate(d.getDate() - n); return d; };
-const plural = (n, w) => `${qty(n)} ${w}${n0(n) === 1 ? '' : (/(s|x|z|ch|sh)$/.test(w) ? 'es' : 's')}`;
+// 1 carton, ½ carton, 1½ cartons, 0 cartons
+const plural = (n, w) => `${qty(n)} ${w}${n0(n) > 0 && n0(n) <= 1 ? '' : (/(s|x|z|ch|sh)$/.test(w) ? 'es' : 's')}`;
 const cleanUser = u => String(u || '').trim().toLowerCase();
 const toEmail = u => `${cleanUser(u)}@${LOGIN_DOMAIN}`;
 const isVoid = s => s.status === 'void';
@@ -919,7 +934,7 @@ function productModal(id) {
       <label class="field"><span>Sold per</span><input id="pf-unit" required list="units" value="${esc(p?.unit || 'carton')}"><datalist id="units">${UNITS.map(u => `<option value="${u}">`).join('')}</datalist></label>
       <label class="field"><span id="pf-pl">Price (${CUR})</span><input id="pf-price" type="number" min="0" step="any" inputmode="decimal" required value="${p ? n0(p.price) : ''}"></label>
     </div>
-    ${p ? `<label class="field"><span>Stock count</span><input id="pf-qty" type="number" min="0" step="1" inputmode="numeric" required value="${n0(p.qty)}"><small>Only change this to fix a wrong count. For new goods, use “Add stock”.</small></label>
+    ${p ? `<label class="field"><span>Stock count</span><input id="pf-qty" type="text" inputmode="decimal" autocomplete="off" required value="${esc(qty(p.qty))}"><small>Only change this to fix a wrong count. For new goods, use “Add stock”.</small></label>
     <label class="field" id="pf-why-w" hidden><span>Why did the count change?</span><input id="pf-why" placeholder="e.g. 3 cartons damaged"></label>` : ''}
     <div class="err" id="pf-err"></div>
   </div>
@@ -929,7 +944,7 @@ function productModal(id) {
   const setPriceLabel = () => { $('#pf-pl', m).textContent = `Price per ${unitEl.value.trim().toLowerCase() || 'unit'} (${CUR})`; };
   unitEl.addEventListener('input', setPriceLabel); setPriceLabel();
   const startQty = p ? n0(p.qty) : 0;
-  if (p) $('#pf-qty', m).addEventListener('input', e => { $('#pf-why-w', m).hidden = n0(e.target.value) === startQty; });
+  if (p) $('#pf-qty', m).addEventListener('input', e => { $('#pf-why-w', m).hidden = parseQty(e.target.value) === startQty; });
 
   $('#pf', m).addEventListener('submit', async e => {
     e.preventDefault();
@@ -937,7 +952,8 @@ function productModal(id) {
     const name = $('#pf-name', m).value.trim();
     const args = { p_id: p ? p.id : null, p_name: name, p_unit: unitEl.value, p_price: n0($('#pf-price', m).value) };
     if (p) {
-      const newQty = Math.floor(n0($('#pf-qty', m).value));
+      const newQty = parseQty($('#pf-qty', m).value);
+      if (!(newQty >= 0)) return err.textContent = `Check the stock count. ${QTY_HELP}`;
       if (newQty !== startQty) { args.p_qty = newQty; args.p_reason = $('#pf-why', m).value || null; }
     }
     busy(btn, true); err.textContent = '';
@@ -991,7 +1007,7 @@ function stockModal(presetId) {
   <form id="sf"><div class="modal-b">
     <label class="field"><span>Product</span><select id="sf-p" required>${S.products.map(p => `<option value="${p.id}" ${p.id === presetId ? 'selected' : ''}>${esc(p.name)} (${qty(p.qty)} in stock)</option>`).join('')}</select></label>
     <div class="grid2">
-      <label class="field"><span id="sf-ql">Quantity received</span><input id="sf-q" type="number" min="1" step="1" inputmode="numeric" required></label>
+      <label class="field"><span id="sf-ql">Quantity received</span><input id="sf-q" type="text" inputmode="decimal" autocomplete="off" required placeholder="e.g. 20 or 2 1/2"></label>
       <label class="field"><span>Cost per unit (${CUR}) · optional</span><input id="sf-c" type="number" min="0" step="any" inputmode="decimal"></label>
     </div>
     <label class="field"><span>Supplier · optional</span><input id="sf-s" placeholder="e.g. Eva Water depot"></label>
@@ -1005,8 +1021,8 @@ function stockModal(presetId) {
 
   $('#sf', m).addEventListener('submit', async e => {
     e.preventDefault();
-    const p = productById(sel.value), q = Math.floor(n0($('#sf-q', m).value));
-    if (!p || q <= 0) return $('#sf-err', m).textContent = 'Enter how many came in.';
+    const p = productById(sel.value), q = parseQty($('#sf-q', m).value);
+    if (!p || !(q > 0)) return $('#sf-err', m).textContent = `Enter how many came in. ${QTY_HELP}`;
     const costRaw = $('#sf-c', m).value.trim();
     const args = { p_product: p.id, p_qty: q, p_cost: costRaw === '' ? null : n0(costRaw), p_supplier: $('#sf-s', m).value.trim() || null, p_note: $('#sf-n', m).value.trim() || null };
     const view = { product_id: p.id, product_name: p.name, unit: p.unit, qty: q, cost_per_unit: args.p_cost, supplier: args.p_supplier, note: args.p_note,
@@ -1059,7 +1075,7 @@ function saleModal() {
     div.className = 'line';
     div.innerHTML = `
       <label class="field pcol"><span>Product</span><select class="l-p">${opts(avail[0].id)}</select></label>
-      <label class="field"><span class="l-ql">Quantity</span><input class="l-q num" type="number" min="1" step="1" inputmode="numeric" placeholder="How many?"></label>
+      <label class="field"><span class="l-ql">Quantity</span><input class="l-q num" type="text" inputmode="decimal" autocomplete="off" placeholder="e.g. 2 or 1/2"></label>
       <label class="field"><span>Price each (${CUR})</span><input class="l-pr num" type="number" min="0" step="any" inputmode="decimal"></label>
       <button type="button" class="btn ghost rm" aria-label="Remove item">${icon('x')}</button>
       <div class="info"></div>`;
@@ -1081,9 +1097,10 @@ function saleModal() {
 
   const readLines = () => $$('.line', linesEl).map(div => {
     const p = productById($('.l-p', div).value);
-    const q = Math.floor(n0($('.l-q', div).value));
+    const typed = $('.l-q', div).value.trim(), q = parseQty(typed);
     const price = n0($('.l-pr', div).value);
-    return { div, p, qty: q, price, total: q * price };
+    const ok = q > 0;
+    return { div, p, qty: ok ? q : 0, bad: typed !== '' && !ok, price, total: ok ? lineTotal(q, price) : 0 };
   });
 
   function update() {
@@ -1092,6 +1109,7 @@ function saleModal() {
     lines.forEach(l => want.set(l.p.id, (want.get(l.p.id) || 0) + l.qty));
     lines.forEach(l => {
       const msgs = [];
+      if (l.bad) msgs.push(`<span class="bad">Use a whole number or quarters, like 2, 1/2 or 1¼</span>`);
       if (want.get(l.p.id) > n0(l.p.qty)) msgs.push(`<span class="bad">Not enough stock</span>`);
       msgs.push(`<span>In stock: ${qty(l.p.qty)}</span>`, `<span>Line total: <b class="num">${money(l.total)}</b></span>`);
       if (l.price !== n0(l.p.price)) msgs.push(`<span class="pill warn">Special price (list ${money(l.p.price)})</span>`);
@@ -1114,14 +1132,16 @@ function saleModal() {
   $('#nf', m).addEventListener('submit', async e => {
     e.preventDefault();
     const err = $('#nf-err', m); err.textContent = '';
-    const raw = readLines().filter(l => l.qty > 0);
+    const lines = readLines();
+    if (lines.some(l => l.bad)) return err.textContent = QTY_HELP;
+    const raw = lines.filter(l => l.qty > 0);
     if (!raw.length) return err.textContent = 'Add at least one item with a quantity.';
     const merged = [];
     raw.forEach(l => {
       const ex = merged.find(x => x.p.id === l.p.id && x.price === l.price);
       if (ex) ex.qty += l.qty; else merged.push({ p: l.p, qty: l.qty, price: l.price });
     });
-    const total = merged.reduce((a, l) => a + l.qty * l.price, 0);
+    const total = merged.reduce((a, l) => a + lineTotal(l.qty, l.price), 0);
     const paid = Math.min(Math.max(0, n0($('#nf-paid', m).value)), total);
     const name = $('#nf-c', m).value.trim();
     if (paid < total && !name) return err.textContent = 'This customer still owes money. Enter their name so you can follow up.';
@@ -1137,7 +1157,7 @@ function saleModal() {
       p_customer_name: name || null, p_customer_phone: phone, p_note: note };
     const view = {
       invoice_no: null, customer_name: name || null, customer_phone: phone, method, note, status: 'ok',
-      items: merged.map(l => ({ product_id: l.p.id, name: l.p.name, unit: l.p.unit, qty: l.qty, price: l.price, list_price: n0(l.p.price), total: l.qty * l.price })),
+      items: merged.map(l => ({ product_id: l.p.id, name: l.p.name, unit: l.p.unit, qty: l.qty, price: l.price, list_price: n0(l.p.price), total: lineTotal(l.qty, l.price) })),
       total, amount_paid: paid, balance: total - paid, sold_by: S.user.id, sold_by_name: S.profile.name, sold_by_code: S.profile.staff_code,
     };
 
