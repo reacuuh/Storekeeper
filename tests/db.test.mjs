@@ -151,9 +151,9 @@ const saleErr = (items, method, paid, name = null, who = STAFF) =>
 
 const s0 = (await sale([{ product_id: P1, qty: 5 }], 'cash', 8000)).r;
 ok(s0.invoice_no === 'INV-00001', 'staff can sell any quantity (no minimum order)', s0.invoice_no);
-const s1 = (await sale([{ product_id: P1, qty: 10, price: 1 }], 'cash', 16000)).r;
+const s1 = (await sale([{ product_id: P1, qty: 10 }], 'cash', 16000)).r;
 const s1row = (await sys(`select * from public.sales where id=$1`, [s1.id]))[0];
-ok(s1.invoice_no === 'INV-00002' && Number(s1row.total) === 16000, 'staff price override ignored (sold at list price ₦1,600)', s1row.total);
+ok(s1.invoice_no === 'INV-00002' && Number(s1row.total) === 16000, 'an item without a price sells at the list price (₦1,600)', s1row.total);
 ok((await stock(P1)) === 80, 'stock went down (95 − 5 − 10)');
 const tooMany = await saleErr([{ product_id: P1, qty: 1000 }], 'cash', 0);
 ok(tooMany && tooMany.includes('Only 80 cartons'), 'cannot sell more than in stock', tooMany);
@@ -260,15 +260,21 @@ ok((await sys(`select message from public.activity where ref = $1 and kind = 'sa
 await as('authenticated', OWNER, `select public.receive_stock($1, 100)`, [P1]);
 const before1700 = minutesAgo(10);
 await as('authenticated', OWNER, `select public.set_price($1, 1700)`, [P1]);
+const saleLog = async id => (await sys(`select message from public.activity where ref = $1 and kind = 'sale'`, [id]))[0].message;
 const keep = (await sendSale(STAFF, [{ product_id: P1, qty: 2, price: 1600 }], 3200, crypto.randomUUID(), before1700)).r;
-ok(Number((await saleRow(keep.id)).total) === 3200, 'offline sale made before a price change keeps the price on its receipt');
-const after = (await sendSale(STAFF, [{ product_id: P1, qty: 2, price: 1600 }], 3200, crypto.randomUUID(), new Date().toISOString(), 'Late Buyer')).r;
+const keepRow = await saleRow(keep.id);
+ok(Number(keepRow.total) === 3200 && Number(keepRow.items[0].list_price) === 1600 && !(await saleLog(keep.id)).includes('special price'),
+  'offline sale made before a price change is at the old list price, not a special price');
+const after = (await sendSale(STAFF, [{ product_id: P1, qty: 2, price: 1600 }], 3000, crypto.randomUUID(), new Date().toISOString(), 'Late Buyer')).r;
 const afterRow = await saleRow(after.id);
-ok(Number(afterRow.total) === 3400 && Number(afterRow.balance) === 200, 'offline sale made after the change is saved at the new price', `${afterRow.total} ${afterRow.balance}`);
-const afterLog = (await sys(`select message from public.activity where ref = $1`, [after.id]))[0].message;
-ok(afterLog.includes('₦1,600 on the receipt'), 'the price difference is noted in the log', afterLog);
-const madeUp = (await sendSale(STAFF, [{ product_id: P1, qty: 1, price: 5 }], 5, crypto.randomUUID(), before1700, 'Chancer')).r;
-ok(Number((await saleRow(madeUp.id)).total) === 1700, 'staff cannot pick any other price, even offline');
+ok(Number(afterRow.total) === 3200 && Number(afterRow.balance) === 200, 'offline sale made after the change keeps the price on its receipt', `${afterRow.total} ${afterRow.balance}`);
+const afterLog = await saleLog(after.id);
+ok(afterLog.includes('special price for Table water 75cl: ₦1,600 (list ₦1,700)'), '…and the owner sees it as a special price', afterLog);
+const special = (await sale([{ product_id: P1, qty: 1, price: 1500 }], 'cash', 1500)).r;
+ok(Number((await saleRow(special.id)).total) === 1500 && (await saleLog(special.id)).includes('special price for Table water 75cl: ₦1,500 (list ₦1,700)'),
+  'staff can give a special price, and the owner sees it in the log');
+ok((await err('authenticated', STAFF, `select public.create_sale($1::jsonb, 'cash', 0)`, [JSON.stringify([{ product_id: P1, qty: 1, price: -5 }])])) !== null, 'a price below 0 is refused');
+ok(Number((await sys(`select price from public.products where id=$1`, [P1]))[0].price) === 1700, "a special price doesn't change the list price");
 const future = (await sendSale(STAFF, [{ product_id: P1, qty: 1 }], 1700, crypto.randomUUID(), new Date(Date.now() + 2 * 86400000).toISOString())).r;
 ok(new Date((await saleRow(future.id)).created_at) <= new Date(), 'a device clock in the future is not believed');
 const old = (await sendSale(STAFF, [{ product_id: P1, qty: 1 }], 1700, crypto.randomUUID(), minutesAgo(30 * 24 * 60))).r;

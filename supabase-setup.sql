@@ -9,7 +9,7 @@
 --    received, a price change, new staff…) goes through one of the
 --    functions below, which checks who is asking and writes the
 --    activity log at the same time. Staff cannot skip the log or
---    change prices, even with technical tricks.
+--    change the list prices, even with technical tricks.
 --  * Owner: can do everything. Staff: record sales and stock received,
 --    see prices, see only their own sales.
 -- =====================================================================
@@ -44,7 +44,7 @@ create table if not exists public.products (
   updated_at     timestamptz not null default now()
 );
 -- The price before the last change, and when it changed. A sale made without internet
--- before the change keeps the price printed on its receipt (see create_sale).
+-- before the change is compared with the old price, so it isn't noted as a special price.
 alter table public.products add column if not exists prev_price numeric(14,2);
 alter table public.products add column if not exists price_changed_at timestamptz;
 
@@ -462,11 +462,13 @@ end $$;
 -- ---------------------------------------------------------------------
 --  SALES (owner and staff)
 --  p_items: [{"product_id": "...", "qty": 10, "price": 1200}]
---  Staff always sell at the list price. The owner may give a special price.
+--  Without a price an item sells at the list price. The owner and staff may
+--  both give a special price; each one is noted in the activity log, so the
+--  owner can see who sold below (or above) the list price.
 --  A sale made without internet (p_made_at set) has already happened: the
 --  goods are gone and the customer has a receipt. So a stock count that is
 --  too low doesn't stop it (stock stops at 0 and the owner gets a note), and
---  if the owner changed the price after the sale, the receipt's price stays.
+--  it is compared with the list price of the time it was made.
 -- ---------------------------------------------------------------------
 create or replace function public.create_sale(
   p_items jsonb, p_method text, p_amount_paid numeric,
@@ -482,7 +484,7 @@ declare
   v_prod    public.products;
   v_qty     integer;
   v_price   numeric(14,2);
-  v_asked   numeric;
+  v_list    numeric(14,2);
   v_lines   jsonb := '[]'::jsonb;
   v_total   numeric(14,2) := 0;
   v_paid    numeric(14,2);
@@ -533,22 +535,19 @@ begin
       v_short := v_short || jsonb_build_array(jsonb_build_object('id', v_prod.id, 'name', v_prod.name, 'unit', v_prod.unit, 'had', v_prod.qty, 'sold', v_qty));
     end if;
 
-    v_price := v_prod.price;
-    if jsonb_typeof(v_item.e->'price') = 'number' then
-      v_asked := (v_item.e->>'price')::numeric;
-      if v_me.role = 'owner' or (v_offline and v_asked = v_prod.prev_price and v_when < v_prod.price_changed_at) then
-        v_price := v_asked;
-      elsif v_offline and v_asked <> v_prod.price then
-        v_notes := v_notes || format('%s was %s on the receipt but is saved at %s', v_prod.name, private.naira(v_asked), private.naira(v_prod.price));
-      end if;
-    end if;
+    -- An offline sale made before the owner's last price change was at the old list price.
+    v_list := case when v_offline and v_when < v_prod.price_changed_at then coalesce(v_prod.prev_price, v_prod.price) else v_prod.price end;
+    v_price := case when jsonb_typeof(v_item.e->'price') = 'number' then (v_item.e->>'price')::numeric else v_list end;
     if v_price < 0 then raise exception 'Price cannot be below 0.'; end if;
+    if v_price <> v_list then
+      v_notes := v_notes || format('special price for %s: %s (list %s)', v_prod.name, private.naira(v_price), private.naira(v_list));
+    end if;
 
     update public.products set qty = greatest(qty - v_qty, 0), updated_at = now() where id = v_prod.id;
 
     v_lines := v_lines || jsonb_build_array(jsonb_build_object(
       'product_id', v_prod.id, 'name', v_prod.name, 'unit', v_prod.unit, 'qty', v_qty,
-      'price', v_price, 'list_price', v_prod.price, 'total', v_qty * v_price));
+      'price', v_price, 'list_price', v_list, 'total', v_qty * v_price));
     v_total := v_total + v_qty * v_price;
   end loop;
 
