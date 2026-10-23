@@ -224,11 +224,17 @@ window.addEventListener('storage', e => {
   showChanges(); syncNow();
 });
 
-function saveCacheSoon() {
-  const uid = S.user.id;
-  clearTimeout(S.timers.cache);
-  S.timers.cache = setTimeout(() => writeJSON(cacheKey(uid), { profile: S.profile, base: S.base, savedAt: S.savedAt }), 500);
+function writeCache() {
+  S.timers.cache = null;
+  if (S.user) writeJSON(cacheKey(S.user.id), { profile: S.profile, base: S.base, savedAt: S.savedAt });
 }
+// Several loads usually finish together, so the copy is written once they're done...
+function saveCacheSoon() {
+  clearTimeout(S.timers.cache);
+  S.timers.cache = setTimeout(writeCache, 500);
+}
+// ...or straight away if the app is closed or reloaded before that.
+window.addEventListener('pagehide', () => { if (S.timers.cache) { clearTimeout(S.timers.cache); writeCache(); } });
 
 // Saves a sale, stock received or a payment. Resolves with { data } once the database has it,
 // or { waiting: true } when it's kept on this device for later. Throws when the database
@@ -490,7 +496,7 @@ function logout() {
 async function signOut() {
   const uid = S.user.id;
   if (!S.offline) await logEvent('logout', 'Logged out');
-  clearTimeout(S.timers.cache);
+  clearTimeout(S.timers.cache); S.timers.cache = null;
   writeKey(cacheKey(uid), '');   // this device may be shared; don't leave the records on it
   await sb.auth.signOut({ scope: 'local' });
 }
@@ -1020,7 +1026,6 @@ function stockModal(presetId) {
 function saleModal() {
   const avail = S.products.filter(p => n0(p.qty) > 0);
   if (!avail.length) return toast(S.products.length ? 'Everything is out of stock. Receive stock first.' : 'No products yet.', 'bad');
-  const owner = isOwner();
   const m = openModal(`${mHead('New sale')}
   <form id="nf" autocomplete="off"><div class="modal-b">
     <div class="grid2">
@@ -1055,7 +1060,7 @@ function saleModal() {
     div.innerHTML = `
       <label class="field pcol"><span>Product</span><select class="l-p">${opts(avail[0].id)}</select></label>
       <label class="field"><span class="l-ql">Quantity</span><input class="l-q num" type="number" min="1" step="1" inputmode="numeric" placeholder="How many?"></label>
-      <label class="field"><span>Price each (${CUR})</span><input class="l-pr num" type="number" min="0" step="any" inputmode="decimal" ${owner ? '' : 'readonly'}></label>
+      <label class="field"><span>Price each (${CUR})</span><input class="l-pr num" type="number" min="0" step="any" inputmode="decimal"></label>
       <button type="button" class="btn ghost rm" aria-label="Remove item">${icon('x')}</button>
       <div class="info"></div>`;
     linesEl.appendChild(div);
@@ -1077,7 +1082,7 @@ function saleModal() {
   const readLines = () => $$('.line', linesEl).map(div => {
     const p = productById($('.l-p', div).value);
     const q = Math.floor(n0($('.l-q', div).value));
-    const price = owner ? n0($('.l-pr', div).value) : n0(p.price);
+    const price = n0($('.l-pr', div).value);
     return { div, p, qty: q, price, total: q * price };
   });
 
@@ -1089,7 +1094,7 @@ function saleModal() {
       const msgs = [];
       if (want.get(l.p.id) > n0(l.p.qty)) msgs.push(`<span class="bad">Not enough stock</span>`);
       msgs.push(`<span>In stock: ${qty(l.p.qty)}</span>`, `<span>Line total: <b class="num">${money(l.total)}</b></span>`);
-      if (owner && l.price !== n0(l.p.price)) msgs.push(`<span class="pill warn">Special price (list ${money(l.p.price)})</span>`);
+      if (l.price !== n0(l.p.price)) msgs.push(`<span class="pill warn">Special price (list ${money(l.p.price)})</span>`);
       $('.info', l.div).innerHTML = msgs.join('');
     });
     const total = lines.reduce((a, l) => a + l.total, 0);
@@ -1127,8 +1132,7 @@ function saleModal() {
     if (short) return err.textContent = `Only ${plural(short.p.qty, short.p.unit)} of ${short.p.name} left in stock.`;
 
     const phone = $('#nf-ph', m).value.trim() || null, note = $('#nf-note', m).value.trim() || null, method = $('#nf-m', m).value;
-    // The price goes with every item: the database uses it for the owner, and for a sale made
-    // offline just before a price change (see create_sale). Otherwise staff get the list price.
+    // Owner and staff can both change an item's price; the database notes it for the owner.
     const args = { p_items: merged.map(l => ({ product_id: l.p.id, qty: l.qty, price: l.price })), p_method: method, p_amount_paid: paid,
       p_customer_name: name || null, p_customer_phone: phone, p_note: note };
     const view = {
