@@ -64,7 +64,7 @@ async function err(role, uid, sql, params = []) {
 }
 const one = async (...a) => (await as(...a)).rows[0];
 const sys = async (sql, p = []) => (await db.query(sql, p)).rows;
-const stock = async id => (await sys(`select qty from public.products where id=$1`, [id]))[0].qty;
+const stock = async id => Number((await sys(`select qty from public.products where id=$1`, [id]))[0].qty);
 // Same checks Supabase Auth makes on a password login (see FindUserByEmailAndAudience)
 async function loginOk(username, pw) {
   const r = await sys(`select id from auth.users where instance_id = '00000000-0000-0000-0000-000000000000'
@@ -294,6 +294,35 @@ ok(archivedOnline && archivedOnline.includes('no longer on the list'), 'removed 
 const archivedOffline = (await sendSale(STAFF, [{ product_id: P2, qty: 1 }], 2400.5, crypto.randomUUID(), minutesAgo(2))).r;
 ok(!!archivedOffline.invoice_no, 'a sale of a removed product made offline (before it was removed) is still saved');
 for (const fn of ['create_sale', 'receive_stock', 'record_payment']) {
+  ok((await sys(`select count(*)::int c from pg_proc where proname = $1`, [fn]))[0].c === 1, `only one version of ${fn} exists`);
+}
+
+console.log('\nSelling part of a carton (quarters)');
+const words = (await sys(`select private.units(0.5, 'carton') a, private.units(1, 'carton') b, private.units(1.5, 'box') c,
+  private.units(2.75, 'bag') d, private.units(1200, 'pack') e, private.units(0, 'carton') f`))[0];
+ok(words.a === '½ carton' && words.b === '1 carton' && words.c === '1½ boxes' && words.d === '2¾ bags' && words.e === '1,200 packs' && words.f === '0 cartons',
+  'quantities read as ½ carton, 1½ boxes, 2¾ bags', JSON.stringify(words));
+let q0 = await stock(P1);
+await as('authenticated', STAFF, `select public.receive_stock($1, 2.5)`, [P1]);
+ok(Number(await stock(P1)) === Number(q0) + 2.5, 'stock received can be 2½ cartons');
+q0 = Number(await stock(P1));
+const half = (await sale([{ product_id: P1, qty: 0.5 }], 'cash', 850)).r;
+ok(Number((await saleRow(half.id)).total) === 850 && Number(await stock(P1)) === q0 - 0.5, '½ carton sold at half the price, and stock goes down by ½');
+ok((await saleLog(half.id)).includes('Sold ½ carton of Table water 75cl'), 'the log says "½ carton"');
+const more = (await sale([{ product_id: P1, qty: 1.25 }], 'cash', 2125)).r;
+ok((await saleLog(more.id)).includes('Sold 1¼ cartons of Table water 75cl'), 'the log says "1¼ cartons"');
+const third = await saleErr([{ product_id: P1, qty: 1 / 3 }], 'cash', 0);
+ok(third && third.includes('quarters'), 'a third of a carton is refused', third);
+ok(((await err('authenticated', STAFF, `select public.receive_stock($1, 0.1)`, [P1])) || '').includes('quarters'), 'stock received of 0.1 is refused');
+await as('authenticated', OWNER, `select public.save_product($1, 'Table water 75cl', 'carton', 1700, 9.75, 'counted the shelf')`, [P1]);
+ok(Number(await stock(P1)) === 9.75 && (await sys(`select message from public.activity where kind = 'adjust' order by id desc limit 1`))[0].message.includes('→ 9¾ cartons'),
+  'owner can correct the count to 9¾ cartons');
+await as('authenticated', OWNER, `select public.void_sale($1, 'wrong item')`, [half.id]);
+ok(Number(await stock(P1)) === 10.25, 'cancelling the ½ carton sale puts ½ back');
+const kobo = (await sale([{ product_id: P1, qty: 0.25, price: 2400.5 }], 'cash', 600.13, null, null, OWNER)).r;
+const koboRow = await saleRow(kobo.id);
+ok(Number(koboRow.total) === 600.13 && Number(koboRow.items[0].total) === 600.13, '¼ of ₦2,400.50 is ₦600.13 on the line and in the total', `${koboRow.total} ${koboRow.items[0].total}`);
+for (const fn of ['save_product', 'units']) {
   ok((await sys(`select count(*)::int c from pg_proc where proname = $1`, [fn]))[0].c === 1, `only one version of ${fn} exists`);
 }
 

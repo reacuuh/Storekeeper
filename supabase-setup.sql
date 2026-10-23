@@ -36,7 +36,7 @@ create table if not exists public.products (
   name           text not null,
   unit           text not null default 'carton',
   price          numeric(14,2) not null default 0 check (price >= 0),
-  qty            integer not null default 0 check (qty >= 0),
+  qty            numeric(12,2) not null default 0 check (qty >= 0),
   min_order      integer not null default 1 check (min_order >= 1),
   reorder_level  integer not null default 0 check (reorder_level >= 0),
   archived       boolean not null default false,
@@ -95,7 +95,7 @@ create table if not exists public.stock_ins (
   product_id        uuid references public.products(id) on delete set null,
   product_name      text not null,
   unit              text not null,
-  qty               integer not null check (qty > 0),
+  qty               numeric(12,2) not null check (qty > 0),
   cost_per_unit     numeric(14,2),
   supplier          text,
   note              text,
@@ -105,6 +105,10 @@ create table if not exists public.stock_ins (
   created_at        timestamptz not null default now()
 );
 create index if not exists stock_ins_created_idx on public.stock_ins (created_at desc);
+
+-- Quantities can be in quarters (½ carton, 1¼ bags). Older databases had whole numbers only.
+alter table public.products  alter column qty type numeric(12,2);
+alter table public.stock_ins alter column qty type numeric(12,2);
 
 create table if not exists public.activity (
   id          bigint generated always as identity primary key,
@@ -170,10 +174,25 @@ language sql immutable set search_path = '' as $$
                      else to_char(v, 'FM999,999,999,999,990.00') end;
 $$;
 
-create or replace function private.units(n integer, unit text) returns text
+-- Quantities are whole numbers or quarters: 3, ½, 2¾ …
+create or replace function private.is_quarters(n numeric) returns boolean
 language sql immutable set search_path = '' as $$
-  select to_char(n, 'FM999,999,999,990') || ' ' || unit ||
-         case when n = 1 then ''
+  select n * 4 = trunc(n * 4);
+$$;
+
+-- 1200 → "1,200", 9.5 → "9½", 0.25 → "¼"
+create or replace function private.qty_text(n numeric) returns text
+language sql immutable set search_path = '' as $$
+  select case when trunc(n) = 0 and n <> 0 then '' else to_char(trunc(n), 'FM999,999,999,990') end
+      || case round((n - trunc(n)) * 4) when 1 then '¼' when 2 then '½' when 3 then '¾' else '' end;
+$$;
+
+-- This used to take whole numbers only; remove that version so the one below is used.
+drop function if exists private.units(integer, text);
+create or replace function private.units(n numeric, unit text) returns text
+language sql immutable set search_path = '' as $$
+  select private.qty_text(n) || ' ' || unit ||
+         case when n > 0 and n <= 1 then ''   -- 1 carton, ½ carton, 1½ cartons
               when unit ~ '(s|x|z|ch|sh)$' then 'es'
               else 's' end;
 $$;
@@ -320,11 +339,13 @@ end $$;
 -- An earlier version of this function also took a minimum order and a warning
 -- level. Remove it so only the simple version below exists.
 drop function if exists public.save_product(uuid, text, text, numeric, integer, integer, integer, text);
+-- ...and the version that took whole-number stock counts only.
+drop function if exists public.save_product(uuid, text, text, numeric, integer, text);
 
 -- Add a product (p_id null) or edit one. New products start with 0 in stock;
 -- stock is added with receive_stock. p_qty is only for correcting a wrong count.
 create or replace function public.save_product(
-  p_id uuid, p_name text, p_unit text, p_price numeric, p_qty integer default null, p_reason text default null
+  p_id uuid, p_name text, p_unit text, p_price numeric, p_qty numeric default null, p_reason text default null
 ) returns uuid language plpgsql security definer set search_path = '' as $$
 declare
   v_me      public.profiles := private.require_owner();
@@ -339,6 +360,7 @@ begin
   if v_unit = '' then v_unit := 'unit'; end if;
   if p_price is null or p_price < 0 then raise exception 'Enter a price of 0 or more.'; end if;
   if p_qty is not null and p_qty < 0 then raise exception 'Stock count cannot be below 0.'; end if;
+  if p_qty is not null and not private.is_quarters(p_qty) then raise exception 'Quantities can be whole numbers or quarters, like 2, ½ or 1¼.'; end if;
 
   if p_id is null then
     insert into public.products (name, unit, price, qty)
@@ -422,8 +444,10 @@ end $$;
 --    really happened, and the change is marked "made offline" in the log.
 -- ---------------------------------------------------------------------
 
--- These used to have fewer parameters. Remove the old versions so only one of each exists.
+-- These used to have fewer parameters (and receive_stock took whole numbers only).
+-- Remove the old versions so only one of each exists.
 drop function if exists public.receive_stock(uuid, integer, numeric, text, text);
+drop function if exists public.receive_stock(uuid, integer, numeric, text, text, uuid, timestamptz);
 drop function if exists public.create_sale(jsonb, text, numeric, text, text, text);
 drop function if exists public.record_payment(uuid, numeric, text);
 
@@ -431,7 +455,7 @@ drop function if exists public.record_payment(uuid, numeric, text);
 --  STOCK RECEIVED (owner and staff)
 -- ---------------------------------------------------------------------
 create or replace function public.receive_stock(
-  p_product uuid, p_qty integer, p_cost numeric default null, p_supplier text default null, p_note text default null,
+  p_product uuid, p_qty numeric, p_cost numeric default null, p_supplier text default null, p_note text default null,
   p_client_id uuid default null, p_made_at timestamptz default null
 ) returns void language plpgsql security definer set search_path = '' as $$
 declare
@@ -441,6 +465,7 @@ declare
   v_when timestamptz := private.made_at(p_made_at);
 begin
   if p_qty is null or p_qty <= 0 then raise exception 'Enter how many came in.'; end if;
+  if not private.is_quarters(p_qty) then raise exception 'Quantities can be whole numbers or quarters, like 2, ½ or 1¼.'; end if;
   if p_cost is not null and p_cost < 0 then raise exception 'Cost cannot be below 0.'; end if;
   -- Two copies arriving together: the second one fails on the id below and changes nothing.
   if p_client_id is not null and exists (select 1 from public.stock_ins where id = p_client_id) then return; end if;
@@ -482,7 +507,8 @@ declare
   v_old     public.sales;
   v_item    record;
   v_prod    public.products;
-  v_qty     integer;
+  v_qty     numeric;
+  v_line    numeric(14,2);
   v_price   numeric(14,2);
   v_list    numeric(14,2);
   v_lines   jsonb := '[]'::jsonb;
@@ -522,8 +548,9 @@ begin
   end if;
 
   for v_item in select t.e, t.ord from jsonb_array_elements(p_items) with ordinality as t(e, ord) order by t.ord loop
-    v_qty := (v_item.e->>'qty')::integer;
-    if v_qty is null or v_qty <= 0 then raise exception 'Every item needs a quantity of at least 1.'; end if;
+    v_qty := (v_item.e->>'qty')::numeric;
+    if v_qty is null or v_qty <= 0 then raise exception 'Every item needs a quantity.'; end if;
+    if not private.is_quarters(v_qty) then raise exception 'Quantities can be whole numbers or quarters, like 2, ½ or 1¼.'; end if;
 
     select * into v_prod from public.products where id = (v_item.e->>'product_id')::uuid and (not archived or v_offline);
     if not found then raise exception 'A product in this sale is no longer on the list. Remove it and try again.'; end if;
@@ -545,10 +572,11 @@ begin
 
     update public.products set qty = greatest(qty - v_qty, 0), updated_at = now() where id = v_prod.id;
 
+    v_line := round(v_qty * v_price, 2);   -- ¼ of ₦2,400.50 is ₦600.13, on the line and in the total
     v_lines := v_lines || jsonb_build_array(jsonb_build_object(
       'product_id', v_prod.id, 'name', v_prod.name, 'unit', v_prod.unit, 'qty', v_qty,
-      'price', v_price, 'list_price', v_list, 'total', v_qty * v_price));
-    v_total := v_total + v_qty * v_price;
+      'price', v_price, 'list_price', v_list, 'total', v_line));
+    v_total := v_total + v_line;
   end loop;
 
   v_paid := least(greatest(coalesce(p_amount_paid, 0), 0), v_total);
@@ -575,7 +603,7 @@ begin
     values (v_sale_id, v_paid, case when p_method = 'credit' then 'cash' else p_method end, v_me.id, v_me.name, v_when);
   end if;
 
-  select string_agg(private.units((t.l->>'qty')::integer, t.l->>'unit') || ' of ' || (t.l->>'name'), ', ')
+  select string_agg(private.units((t.l->>'qty')::numeric, t.l->>'unit') || ' of ' || (t.l->>'name'), ', ')
     into v_desc from jsonb_array_elements(v_lines) as t(l);
   perform private.log(v_me, 'sale',
     format('Sold %s to %s for %s%s · %s%s%s', v_desc, coalesce(v_name, 'a walk-in customer'), private.naira(v_total),
@@ -587,8 +615,8 @@ begin
   for v_s in select t.e from jsonb_array_elements(v_short) as t(e) loop
     perform private.log(v_me, 'adjust',
       format('%s: the count showed %s, but %s (made offline) sold %s. Stock set to 0. Please check the shelf.',
-             v_s->>'name', private.units((v_s->>'had')::integer, v_s->>'unit'), v_invoice,
-             private.units((v_s->>'sold')::integer, v_s->>'unit')),
+             v_s->>'name', private.units((v_s->>'had')::numeric, v_s->>'unit'), v_invoice,
+             private.units((v_s->>'sold')::numeric, v_s->>'unit')),
       (v_s->>'id')::uuid);
   end loop;
 
@@ -640,7 +668,7 @@ begin
   if v_s.status = 'void' then raise exception 'This sale was already cancelled.'; end if;
 
   for v_line in select t.e from jsonb_array_elements(v_s.items) as t(e) loop
-    update public.products set qty = qty + (v_line->>'qty')::integer, updated_at = now()
+    update public.products set qty = qty + (v_line->>'qty')::numeric, updated_at = now()
      where id = (v_line->>'product_id')::uuid;
   end loop;
   if v_s.amount_paid > 0 then
