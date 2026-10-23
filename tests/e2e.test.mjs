@@ -416,6 +416,43 @@ try {
   ok((await page.evaluate(() => localStorage.getItem('receiptPrinterName'))) === null, '"Stop using it" forgets the printer');
   await ctx.close();
 
+  // ---------------- part of a carton ----------------
+  console.log('\nSelling part of a carton');
+  ({ ctx, page } = await newPage());
+  await ctx.addInitScript(fakeWindowsApp);
+  await login(page, 'blessing', 'newbless9');
+  await page.waitForSelector('h1:text("My sales")');
+  await page.click('.rail [data-act="printer"]');
+  await page.click('#pr-use');
+  await page.click('.modal-f >> text=Done');
+  await page.click('text=New sale');
+  const halfLine = page.locator('.line').nth(0);
+  await halfLine.locator('.l-p').selectOption({ label: 'Coke 50cl · ₦2,400/pack' });
+  await halfLine.locator('.l-q').fill('1/3');
+  ok(await halfLine.locator('.info :text("Use a whole number or quarters")').isVisible(), 'a third of a pack is pointed out on the form');
+  await halfLine.locator('.l-q').fill('1/2');
+  ok((await page.locator('#nf-tot').innerText()) === '₦1,200', '"1/2" pack of Coke comes to ₦1,200', await page.locator('#nf-tot').innerText());
+  await page.click('#nf-save');
+  await page.waitForSelector('.invoice td:text("½ pack")');
+  ok(true, 'the invoice says "½ pack"');
+  await clearToasts(page);
+  await page.click('#iv-print');
+  await page.waitForSelector('.toast:has-text("Receipt sent to the printer")');
+  const halfReceipt = readReceipt((await page.evaluate(() => window.__desk.jobs.splice(0)))[0].bytes);
+  if (halfReceipt) await receiptShot(page, halfReceipt, '18-receipt-half');
+  await page.click('.modal-f >> text=Done');
+  await page.click('[data-nav="products"] >> visible=true');
+  await page.waitForSelector('.pcard:has-text("Coke 50cl") .stockline b:text-matches("½$")');
+  ok(true, 'the stock count shows the ½ pack left over');
+  await page.click('[data-nav="stock"] >> visible=true');
+  await page.click('text=Receive stock');
+  await page.selectOption('#sf-p', await page.locator('#sf-p option', { hasText: 'Coke 50cl' }).getAttribute('value'));
+  await page.fill('#sf-q', '1½');
+  await page.click('#sf button[type=submit]');
+  await page.waitForSelector('tr:has-text("Coke 50cl"):has-text("1½ packs")');
+  ok(true, 'stock received can be "1½" packs');
+  await ctx.close();
+
   // ---------------- no internet ----------------
   console.log('\nWorking without internet (staff on the warehouse computer)');
   const noDatabase = /\/(rest|auth)\/v1\//;
@@ -427,7 +464,8 @@ try {
   await page.click('#pr-use');
   await page.click('.modal-f >> text=Done');
   await page.click('[data-nav="products"] >> visible=true');
-  const countOf = async name => Number((await page.locator(`.pcard:has-text("${name}") .stockline b`).innerText()).replace(/,/g, ''));
+  const countOf = async name => Number((await page.locator(`.pcard:has-text("${name}") .stockline b`).innerText())
+    .replace(/,/g, '').replace(/[¼½¾]/, c => ({ '¼': '.25', '½': '.5', '¾': '.75' })[c]));
   const waterBefore = await countOf('Table water 75cl'), cokeBefore = await countOf('Coke 50cl');
   await page.waitForTimeout(700); // what's loaded is kept on the device half a second later
 

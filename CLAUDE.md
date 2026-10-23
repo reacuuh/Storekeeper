@@ -67,6 +67,7 @@ This one file is the whole database: tables, row level security, and every write
   - check permissions inside it with `private.me()` or `private.require_owner()`;
   - write to the activity log with `private.log()`.
 - **Permissions:** the owner can do everything. Staff can record sales and stock received and see prices. Since 2026-10-23 (the user's choice) staff can also give a special price on a sale; `create_sale` notes every price that differs from the list price in the activity log. Staff can't change list prices or products, and can't see other people's sales, payments or the activity log. Keep it that way.
+- **Quantities** are whole numbers or quarters (`private.is_quarters()`), stored as `numeric(12,2)`. They are shown as ½, ¼, ¾ by `qty()` in `app.js` and `private.qty_text()` in the SQL, and read by `parseQty()`, which also takes "1/2" and "1½". Line totals are rounded to the kobo on both sides (`lineTotal()`, `round(..., 2)`).
 - **Logins:**
   - Usernames become `<username>@login.warehouse.invalid`. `private.login_email()` in the SQL and `LOGIN_DOMAIN` in `app.js` must match.
   - Logins are created in SQL by `private.create_login()`.
