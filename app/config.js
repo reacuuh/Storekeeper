@@ -3,9 +3,9 @@
 // ============================================================
 window.APP_CONFIG = {
   // Shown at the top of the app and on every invoice
-  businessName: "My Warehouse",
-  businessAddress: "Lagos, Nigeria",
-  businessPhone: "",
+  businessName: "Victoad Enterprises",
+  businessAddress: "Opposite Holmed Hospital Junction, Ashipa, Ibadan",
+  businessPhone: "08067000779",
 
   currency: "₦",
 
