@@ -192,7 +192,7 @@ try {
   await page.fill('#nf-ph', '08031112222');
   const line1 = page.locator('.line').nth(0);
   await line1.locator('.l-p').selectOption({ label: 'Table water 75cl · ₦1,600/carton' });
-  ok(await line1.locator('.l-pr').getAttribute('readonly') !== null, 'staff cannot type a price');
+  ok(await line1.locator('.l-pr').isEditable() && (await line1.locator('.l-pr').inputValue()) === '1600', 'staff can change the price, which starts at the list price');
   await line1.locator('.l-q').fill('20');
   await page.click('#nf-add');
   const line2 = page.locator('.line').nth(1);
@@ -437,6 +437,8 @@ try {
   await page.fill('#nf-c', 'Mama Tunde');
   await page.locator('.line').nth(0).locator('.l-p').selectOption({ label: 'Table water 75cl · ₦1,600/carton' });
   await page.locator('.line').nth(0).locator('.l-q').fill('3');
+  await page.locator('.line').nth(0).locator('.l-pr').fill('1500');
+  ok(await page.locator('.line .info :text("Special price (list ₦1,600)")').isVisible(), 'staff special price is shown on the sale form');
   await page.selectOption('#nf-m', 'credit');
   await page.click('#nf-save');
   await page.waitForSelector('.toast:has-text("The sale is saved on this device")');
@@ -498,7 +500,7 @@ try {
   await page.waitForSelector('h1:text("My sales")');
   await page.waitForSelector('#syncbar:has-text("No internet")');
   ok(await page.locator(`tr:has-text("${offlineInv}")`).first().isVisible(), 'opened without internet after the login expired: still works from what was saved',
-    await page.locator('#main').innerText().catch(() => ''));
+    JSON.stringify(await page.locator('#main').innerText().catch(() => '')));
   await page.unroute(noDatabase);
   await ctx.close();
 
@@ -515,7 +517,7 @@ try {
   await A.page.fill('#pm-a', '1000');
   await A.page.click('#pm button[type=submit]');
   await A.page.waitForSelector('.toast:has-text("The payment is saved on this device")');
-  await A.page.waitForSelector('.invoice .tots :text("₦3,800")');
+  await A.page.waitForSelector('.invoice .tots :text("₦3,500")');
   ok(true, 'a payment made without internet already shows on the invoice');
   await B.page.click('#iv-pay');
   await B.page.click('#pm button[type=submit]');
@@ -533,6 +535,7 @@ try {
   await B.page.click('.modal-f >> text=Done');
   await B.page.click('[data-nav="activity"] >> visible=true');
   ok(await B.page.locator(`.feed :text("${offlineInv} · made offline")`).isVisible(), 'the owner sees the sale was made offline');
+  ok(await B.page.locator('.feed :text("special price for Table water 75cl: ₦1,500 (list ₦1,600)")').isVisible(), "…and sees the staff member's special price");
   await A.ctx.close(); await B.ctx.close();
 
   // ---------------- phone ----------------

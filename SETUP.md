@@ -152,8 +152,8 @@ If a change touches `supabase-setup.sql`, Claude will say so. Then re-run the fi
 | Record sales and print or WhatsApp invoices | ✓ | ✓ |
 | Record stock received | ✓ | ✓ |
 | See products and prices | ✓ | ✓ |
-| Change prices, add or edit products, correct stock | ✓ | |
-| Give a special price | ✓ | |
+| Change list prices, add or edit products, correct stock | ✓ | |
+| Give a special price on a sale (each one shows in Activity) | ✓ | ✓ |
 | Record money paid later on credit sales | ✓ | |
 | Cancel a sale (stock goes back automatically) | ✓ | |
 | See everyone's sales, the Home dashboard and the Activity log | ✓ | own sales only |

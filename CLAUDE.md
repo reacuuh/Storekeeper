@@ -52,7 +52,7 @@ Stock, bulk sales and staff app for a family water and provisions warehouse in L
 The owner chose this split (2026-10-22): sales, stock received and payments work offline; prices, products, staff, cancelling sales and logging in need internet.
 
 - `save()` in `app/app.js` writes each sale, delivery or payment to an outbox in `localStorage` (`outbox:<user id>`) first, then `sendWaiting()` sends them in order. Network errors, server errors and a login that hasn't been renewed yet leave an item waiting (`canRetry()`). Anything else the database refuses goes to `S.failed` and shows in the red bar.
-- Every item carries `p_client_id`, which becomes the new row's id, so a resend after a lost answer saves it once. Items the user was told are "waiting" also carry `p_made_at`. The database then treats them as already happened: a short stock count is flagged instead of refused, removed products still count, and staff keep the receipt's price if it was the price before the last change (`products.prev_price`, `price_changed_at`). `p_made_at` is kept within the last 7 days.
+- Every item carries `p_client_id`, which becomes the new row's id, so a resend after a lost answer saves it once. Items the user was told are "waiting" also carry `p_made_at`. The database then treats them as already happened: a short stock count is flagged instead of refused, removed products still count, and a sale made before the last price change is compared with the old list price (`products.prev_price`, `price_changed_at`), so it isn't noted as a special price. `p_made_at` is kept within the last 7 days.
 - The screens show `S.base` (rows from the database, also saved as `cache:<user id>` so the app opens offline) plus the outbox, combined in `recompute()`. Never put waiting items into `S.base`.
 - Until a sale is sent it has no invoice number; receipts show `shortRef(id)` instead, which the Sales search also matches.
 - Logging out is blocked while anything is waiting, because waiting items are sent with that login.
@@ -66,7 +66,7 @@ This one file is the whole database: tables, row level security, and every write
 - **The app only reads tables directly.** Add any new behaviour as a function:
   - check permissions inside it with `private.me()` or `private.require_owner()`;
   - write to the activity log with `private.log()`.
-- **Permissions:** the owner can do everything. Staff can record sales and stock received and see prices. Staff can't change prices or products, and can't see other people's sales, payments or the activity log. Keep it that way.
+- **Permissions:** the owner can do everything. Staff can record sales and stock received and see prices. Since 2026-10-23 (the user's choice) staff can also give a special price on a sale; `create_sale` notes every price that differs from the list price in the activity log. Staff can't change list prices or products, and can't see other people's sales, payments or the activity log. Keep it that way.
 - **Logins:**
   - Usernames become `<username>@login.warehouse.invalid`. `private.login_email()` in the SQL and `LOGIN_DOMAIN` in `app.js` must match.
   - Logins are created in SQL by `private.create_login()`.
