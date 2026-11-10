@@ -165,7 +165,7 @@ Every sale, delivery, price change, payment, login and staff change is written t
 
 - **Running low** on the Home screen is worked out from the last 7 days of sales: a product shows up when what's left would last less than a week, or when it's out of stock.
 - **Internet is needed to save a sale.** The stock check happens on the database, so two people can never sell the same last carton.
-- **If the app stops loading:** free Supabase projects are paused after about a week with little or no use. Daily use keeps it awake. If it does pause (e.g. after a long holiday), log in to supabase.com, open the project and click **Resume project**. All the data comes back.
+- **If the app stops loading:** free Supabase projects are paused after about a week with too little database use. A scheduled job on GitHub (**Actions → Keep the database awake**) asks the database a few small questions every morning to prevent that, and GitHub emails you if it fails. If the project is paused anyway, log in to supabase.com, open the project and click **Resume project**. All the data comes back.
 - **Staff member forgot their password:** owner goes to **Staff → New password**.
 - **Owner forgot her password:** in Supabase, open **SQL Editor → New query**, paste this (with her username and a new password), and click **Run**:
 

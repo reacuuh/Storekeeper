@@ -1,0 +1,33 @@
+# Free Supabase projects are paused after a week without database activity
+# ("a few user requests to the database each day" keeps them going). This asks
+# the database a few small questions every morning, using the same public key
+# as the website. If the database can't be reached (for example it was paused
+# anyway), the run fails and GitHub emails the repository owner.
+name: Keep the database awake
+
+on:
+  schedule:
+    - cron: '23 5 * * *'   # every day at 05:23 UTC (06:23 in Lagos)
+  workflow_dispatch:        # "Run workflow" button on the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: app/config.js
+          sparse-checkout-cone-mode: false
+
+      - name: Ask the database a few small questions
+        run: |
+          url=$(grep -o 'https://[a-z0-9]*\.supabase\.co' app/config.js)
+          key=$(grep -o 'sb_publishable_[A-Za-z0-9_-]*' app/config.js)
+          for i in 1 2 3; do
+            curl --fail-with-body --silent --show-error --max-time 30 \
+              -X POST "$url/rest/v1/rpc/owner_exists" \
+              -H "apikey: $key" -H "Content-Type: application/json" -d '{}'
+            echo
+            sleep 10
+          done

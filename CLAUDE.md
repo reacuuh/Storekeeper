@@ -60,6 +60,10 @@ This one file is the whole database: tables, row level security, and every write
   - Logins are created in SQL by `private.create_login()`.
   - Supabase Auth needs the token columns in `auth.users` to be `''`, not NULL.
 
+### Keeping the free database awake
+
+Free Supabase projects are paused after a week with too little database use (it happened in November 2026). `.github/workflows/keep-database-awake.yml` calls `owner_exists` three times every morning with the publishable key it reads from `app/config.js`. So keep `owner_exists` callable without logging in, and update the workflow if the URL or key move out of `config.js`. A failed run means the database couldn't be reached; GitHub emails the owner.
+
 ## Database changes are NOT deployed automatically
 
 Pushing only updates the website. After changing `supabase-setup.sql`, tell the user plainly that it must be re-run: Supabase → SQL Editor → paste the whole file → Run.
