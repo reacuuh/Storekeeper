@@ -576,6 +576,66 @@ try {
   ok(await B.page.locator('.feed :text("special price for Table water 75cl: ₦1,500 (list ₦1,600)")').isVisible(), "…and sees the staff member's special price");
   await A.ctx.close(); await B.ctx.close();
 
+  // ---------------- install button ----------------
+  console.log('\nInstall button');
+  const UA = {
+    windows: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+    iphone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    android: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36',
+  };
+  const loginButton = p => p.locator('[data-install-slot="login"] button');
+  {
+    const c = await browser.newContext({ userAgent: UA.windows, viewport: { width: 1280, height: 860 } });
+    await c.route('https://example.com/**', r => r.fulfill({ body: 'installer' }));
+    const p = await c.newPage();
+    await p.goto(BASE); await p.waitForSelector('#loginForm');
+    ok((await loginButton(p).innerText()) === 'Install the Windows app', 'on a Windows computer the login screen offers the Windows app');
+    const [tab] = await Promise.all([c.waitForEvent('page'), loginButton(p).click()]);
+    ok(tab.url() === 'https://example.com/Warehouse-Manager-Setup.exe', 'it opens the download link from config.js', tab.url());
+    ok(await p.locator('.modal :text("Run anyway")').isVisible(), 'and explains the steps');
+    await shot(p, '19-install-windows');
+    await p.click('.modal-f >> text=OK');
+    await p.fill('#li-user', 'mummy'); await p.fill('#li-pw', 'water2026');
+    await p.click('#loginForm button[type=submit]');
+    await p.waitForSelector('h1:text("Today")');
+    ok(await p.locator('.rail [data-install-slot] button:text("Install the Windows app")').isVisible(), 'and so does the side menu once logged in');
+    await c.close();
+  }
+  {
+    const c = await browser.newContext({ userAgent: UA.windows, viewport: { width: 1280, height: 860 } });
+    await c.addInitScript(fakeWindowsApp);
+    const p = await c.newPage();
+    await p.goto(BASE); await p.waitForSelector('#loginForm');
+    ok((await loginButton(p).count()) === 0, 'inside the Windows app there is nothing to install');
+    await c.close();
+  }
+  {
+    const c = await browser.newContext({ userAgent: UA.iphone, viewport: { width: 390, height: 844 } });
+    const p = await c.newPage();
+    await p.goto(BASE); await p.waitForSelector('#loginForm');
+    await loginButton(p).click();
+    ok(await p.locator('.modal :text("Add to Home Screen, then")').isVisible(), 'on an iPhone it shows how to add it to the home screen');
+    await c.close();
+  }
+  {
+    const c = await browser.newContext({ userAgent: UA.android, viewport: { width: 390, height: 844 } });
+    // Chrome offers to install a site with a "beforeinstallprompt" event; this pretends it did.
+    await c.addInitScript(() => addEventListener('load', () => setTimeout(() => {
+      const e = new Event('beforeinstallprompt');
+      e.prompt = () => { window.__installPrompted = true; };
+      e.userChoice = Promise.resolve({ outcome: 'accepted' });
+      dispatchEvent(e);
+    }, 100)));
+    const p = await c.newPage();
+    await p.goto(BASE); await p.waitForSelector('#loginForm');
+    await p.waitForSelector('[data-install-slot="login"] button:text("Install the app")');
+    await loginButton(p).click();
+    ok(await p.evaluate(() => window.__installPrompted === true), "on an Android phone it opens Chrome's own install");
+    await p.waitForFunction(() => !document.querySelector('[data-install-slot="login"] button'));
+    ok(true, 'and the button goes away afterwards');
+    await c.close();
+  }
+
   // ---------------- phone ----------------
   console.log('\nPhone views');
   ({ ctx, page } = await newPage({ width: 390, height: 844 }));

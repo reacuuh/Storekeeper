@@ -79,6 +79,7 @@ const ICON = {
   cash: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/>',
   chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/>',
   print: '<path d="M6 9V3h12v6"/><rect x="2" y="9" width="20" height="9" rx="2"/><path d="M6 14h12v7H6z"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
   x: '<path d="M6 6l12 12M18 6L6 18"/>',
 };
 const icon = k => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k] || ''}</svg>`;
@@ -571,7 +572,9 @@ async function showLogin(message = '') {
       <div class="err" id="li-err">${esc(message)}</div>
       <button class="btn primary big block" type="submit">Log in</button>
       <p class="muted small" style="margin:0">Forgot your password? Ask the owner to set a new one for you.</p>
-    </form></div></div>`;
+    </form>
+    <div data-install-slot="login" style="margin-top:14px"></div></div></div>`;
+  refreshInstall();
   $('#li-user').focus();
   $('#loginForm').addEventListener('submit', async e => {
     e.preventDefault();
@@ -605,7 +608,7 @@ function renderShell() {
       <div class="who">
         <div class="nm">${esc(p.name)}</div>
         <div class="row" style="gap:6px"><span class="tag ${tagClass(p.staff_code)}">${esc(p.staff_code)}</span><span class="small" style="opacity:.75">@${esc(p.username)}</span></div>
-        <div class="acts">${canPrint() ? '<button data-act="printer">Receipt printer</button>' : ''}<button data-act="pw">Change password</button><button data-act="logout">Log out</button></div>
+        <div class="acts"><span data-install-slot="rail"></span>${canPrint() ? '<button data-act="printer">Receipt printer</button>' : ''}<button data-act="pw">Change password</button><button data-act="logout">Log out</button></div>
       </div>
     </aside>
     <header class="topbar">
@@ -643,6 +646,7 @@ function render(keepFocus = false) {
   main.innerHTML = (views[S.view] || viewSales)();
   bind(main);
   updateLive();
+  refreshInstall();
   if (aid) { const el = document.getElementById(aid); if (el) { el.focus(); if (caret != null) try { el.setSelectionRange(caret, caret); } catch (e) {} } }
 }
 
@@ -904,6 +908,7 @@ function viewMore() {
   <div class="stack" style="max-width:520px">
     ${isOwner() ? item('go', 'staff', 'users', 'Staff', 'Add staff, new passwords, switch logins on or off') + item('go', 'activity', 'pulse', 'Activity', 'Everything staff are doing') : ''}
     ${canPrint() ? item('printer', '', 'print', 'Receipt printer', 'Print receipts on a receipt printer') : ''}
+    <div data-install-slot="more"></div>
     ${item('pw', '', 'key', 'Change my password')}
     ${item('logout', '', 'out', 'Log out')}
   </div>`;
@@ -1668,6 +1673,65 @@ function changePasswordModal() {
       closeModal(); toast('Password changed', 'good');
     } catch (ex) { err.textContent = friendlyError(ex); busy(e.submitter, false); }
   });
+}
+
+/* ----- Install the app on this device ----- */
+// Windows computers get the Windows app, which prints straight to the receipt printer
+// (download link: windowsAppUrl in config.js). Phones and other computers install the
+// website as an app. Nothing shows where the app is already installed.
+let installPrompt = null; // the browser's own install offer, if it makes one
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; refreshInstall(); });
+window.addEventListener('appinstalled', () => { installPrompt = null; refreshInstall(); });
+
+const INSTALL_LABEL = { windows: 'Install the Windows app', browser: 'Install the app', ios: 'Add to Home Screen' };
+function installKind() {
+  const ua = navigator.userAgent;
+  if (window.desktop || matchMedia('(display-mode: standalone)').matches || navigator.standalone) return '';
+  if (/Windows/.test(ua) && CFG.windowsAppUrl) return 'windows';
+  if (installPrompt) return 'browser';
+  // iPads say "Macintosh" but have a touch screen
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ios';
+  return '';
+}
+
+// Fills the install spots on the login screen, the side menu and More.
+function refreshInstall() {
+  const kind = installKind(), label = INSTALL_LABEL[kind];
+  $$('[data-install-slot]').forEach(slot => {
+    const where = slot.dataset.installSlot;
+    slot.innerHTML = !kind ? ''
+      : where === 'rail' ? `<button>${label}</button>`
+      : where === 'more' ? `<button class="btn block" style="justify-content:flex-start;min-height:62px;text-align:left">${icon('download')}<span>${label}</span></button>`
+      : `<button class="btn big block">${icon('download')}${label}</button>`;
+    const btn = $('button', slot);
+    if (btn) btn.addEventListener('click', installApp);
+  });
+}
+
+async function installApp() {
+  const kind = installKind();
+  if (kind === 'browser') {
+    const offer = installPrompt; installPrompt = null;
+    offer.prompt();
+    await offer.userChoice;
+    return refreshInstall();
+  }
+  if (kind === 'windows') window.open(CFG.windowsAppUrl, '_blank', 'noopener');
+  openModal(`${mHead(INSTALL_LABEL[kind])}
+  <div class="modal-b">${kind === 'windows' ? `
+    <p style="margin:0">The download has opened in a new tab.</p>
+    <ol class="steps">
+      <li>If Google Drive says it can't scan the file for viruses, click <b>Download anyway</b>.</li>
+      <li>When it has downloaded, open <b>Warehouse-Manager-Setup</b>.</li>
+      <li>If Windows says <b>Windows protected your PC</b>, click <b>More info</b>, then <b>Run anyway</b>.</li>
+      <li>Open <b>Warehouse Manager</b> from the desktop and log in.</li>
+    </ol>` : `
+    <ol class="steps">
+      <li>Tap the <b>Share</b> button (the square with an arrow) at the bottom of Safari.</li>
+      <li>Tap <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+    </ol>`}
+  </div>
+  <div class="modal-f"><button class="btn primary" data-close>OK</button></div>`);
 }
 
 /* keep "x min ago" fresh */

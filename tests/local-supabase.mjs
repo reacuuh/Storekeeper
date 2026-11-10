@@ -217,7 +217,7 @@ export async function start({ port = 8099, setupSql }) {
       // ---------- static app ----------
       if (url.pathname === '/config.js') {
         res.writeHead(200, { 'content-type': 'text/javascript' });
-        return res.end(`window.APP_CONFIG = { businessName: "Adebayo Water & Provisions", businessAddress: "12 Warehouse Road, Ikeja, Lagos", businessPhone: "0803 123 4567", currency: "₦", supabaseUrl: "http://localhost:${port}", supabaseKey: "${ANON_KEY}" };`);
+        return res.end(`window.APP_CONFIG = { businessName: "Adebayo Water & Provisions", businessAddress: "12 Warehouse Road, Ikeja, Lagos", businessPhone: "0803 123 4567", currency: "₦", windowsAppUrl: "https://example.com/Warehouse-Manager-Setup.exe", supabaseUrl: "http://localhost:${port}", supabaseKey: "${ANON_KEY}" };`);
       }
       let f = path.join(APP_DIR, url.pathname === '/' ? 'index.html' : url.pathname);
       if (!f.startsWith(APP_DIR) || !fs.existsSync(f)) { res.writeHead(404); return res.end('not found'); }

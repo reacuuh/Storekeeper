@@ -64,6 +64,8 @@ Do this right after putting the app online. Until the owner account exists, anyo
 
 ## 7. Install it on the computer and on her phone
 
+Open the web address on the device and tap **Install** under the login box. It does the right thing for that device: on a Windows computer it downloads the Windows app, on an Android phone it installs the app, and on an iPhone it shows how to add it to the home screen. Or do it by hand:
+
 - **Warehouse computer:** install the Windows app (step 9). It prints receipts straight to the receipt printer. Installing from Chrome or Edge also works (open the web address, then click the **install** icon at the right end of the address bar), but then printing goes through the print window.
 - **Android phone (Chrome):** open the web address, tap ⋮ → **Add to Home screen** → **Install**.
 - **iPhone (Safari):** open the web address, tap the **Share** button → **Add to Home Screen**.
@@ -82,7 +84,7 @@ The Windows app shows the same screens as the website and updates by itself when
 
 **Install it:**
 
-1. Copy the installer, `Warehouse-Manager-Setup-1.0.0.exe`, onto the warehouse computer. (It's made from the `desktop` folder; see "Making a new installer" below.)
+1. On the warehouse computer, open the web address and click **Install the Windows app** under the login box. (Or copy the installer, `Warehouse-Manager-Setup-1.0.0.exe`, onto the computer. It's made from the `desktop` folder; see "Making a new installer" below.)
 2. Double-click it. Windows may say **Windows protected your PC**, because the app isn't signed by a company. Click **More info**, then **Run anyway**.
 3. It installs in a few seconds and opens. After that, open **Warehouse Manager** from the desktop or the Start menu.
 
@@ -106,6 +108,8 @@ npm run dist
 ```
 
 `npm run check` sends a test job through Windows into a file, so nothing is printed. `npm run dist` makes the installer in `desktop/dist`. Raise `version` in `desktop/package.json` first, so the new installer has a new name.
+
+The Install button downloads the installer from Google Drive (`windowsAppUrl` in `app/config.js`). To put a new installer there without changing the link, right-click the file in Google Drive, choose **File information → Manage versions → Upload new version**, and pick the new installer. Anyone who downloads it gets the new one.
 
 ### Printing from Chrome or Edge instead
 

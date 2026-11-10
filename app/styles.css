@@ -299,6 +299,10 @@ tbody tr.click:hover { background: var(--surface-2); }
 .syncbar.bad { background: var(--bad-soft); color: var(--bad); }
 .syncbar[hidden] { display: none; }
 
+/* ---------- Install button (installApp in app.js) ---------- */
+.who .acts [data-install-slot], .stack > [data-install-slot] { display: contents; }
+ol.steps { margin: 0; padding-left: 22px; display: grid; gap: 8px; }
+
 /* ---------- Print: only the receipt (printInBrowser in app.js) ---------- */
 /* The rest of the app is display:none, not just hidden, so it takes up no paper. */
 #print-receipt { display: none; }

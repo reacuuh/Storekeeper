@@ -22,7 +22,7 @@ Stock, bulk sales and staff app for a family water and provisions warehouse in L
 - Files:
   - `app/app.js`: all screens and logic.
   - `app/styles.css`: colour tokens for light and dark mode.
-  - `app/config.js`: business name, address and phone printed on invoices, plus the Supabase project URL and publishable key. The key is public by design.
+  - `app/config.js`: business name, address and phone printed on invoices, plus the Supabase project URL and publishable key. The key is public by design. `windowsAppUrl` is the Google Drive link the Install button downloads on Windows computers (`installApp()` in `app.js`); other devices get the browser's own install or, on iPhones, instructions.
   - `app/vendor/supabase.js`: supabase-js 2.117.2 UMD build, vendored.
   - `app/sw.js`: service worker so the site installs like an app. It is network-first. Bump `CACHE` when files are added or renamed.
 
