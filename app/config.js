@@ -10,7 +10,7 @@ window.APP_CONFIG = {
   currency: "₦",
 
   // Download link for the Windows app installer (Google Drive), used by the Install button
-  windowsAppUrl: "",
+  windowsAppUrl: "https://drive.google.com/uc?export=download&id=1U1CrbeqQAjkr1YAFUly7OZHK7Mv3wYS0",
 
   // From Supabase: Connect → Project URL and Publishable key (SETUP.md, step 4)
   supabaseUrl: "https://ikfseujiblhtidarwubv.supabase.co",
